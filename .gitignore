@@ -2,3 +2,7 @@
 .venv/
 # Tests
 AGENT_CONF.md
+# DB files
+webrisk_local.db
+webrisk_local.db-shm
+webrisk_local.db-wal
