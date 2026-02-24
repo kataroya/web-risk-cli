@@ -1,2 +1,4 @@
 # Python Environment
 .venv/
+# Tests
+AGENT_CONF.md
