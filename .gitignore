@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# IDE
+.vscode/
+
 # Agent config (not part of public project)
 AGENT_CONF.md
 
