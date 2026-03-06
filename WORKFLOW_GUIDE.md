@@ -7,15 +7,26 @@
 
 ## 목차
 
-1. [아키텍처 개요](#1-아키텍처-개요)
-2. [사전 준비](#2-사전-준비)
-3. [Workflow 1 — Threat List 동기화 (Sync)](#3-workflow-1--threat-list-동기화-sync)
-4. [Workflow 2 — URL 위협 검사 (Check)](#4-workflow-2--url-위협-검사-check)
+### 개요
+1. [아키텍처 개요](#1-아키텍처-개요) — 시스템 구조, API 비교, 과금
+
+### 준비
+2. [사전 준비](#2-사전-준비) — GCP 설정, Python 환경
+
+### 핵심 워크플로우
+3. [Workflow 1 — Threat List 동기화 (Sync)](#3-workflow-1--threat-list-동기화-sync) — 로컬 DB 업데이트
+4. [Workflow 2 — URL 위협 검사 (Check)](#4-workflow-2--url-위협-검사-check) — 4단계 위협 판정
+
+### 상세 참조 (Workflow 2의 내부 동작)
 5. [Workflow 3 — URL 정규화 (Canonicalization)](#5-workflow-3--url-정규화-canonicalization)
 6. [Workflow 4 — Suffix/Prefix Expression 생성](#6-workflow-4--suffixprefix-expression-생성)
 7. [Workflow 5 — SHA-256 해시 계산](#7-workflow-5--sha-256-해시-계산)
-8. [Workflow 6 — 캐싱](#8-workflow-6--캐싱)
-9. [Workflow 7 — 의심 URL 신고 (Submit URI)](#9-workflow-7--의심-url-신고-submit-uri)
+
+### 부가 기능
+8. [Workflow 6 — 캐싱](#8-workflow-6--캐싱) — URL 검사 결과 캐시
+9. [Workflow 7 — 의심 URL 신고 (Submit URI)](#9-workflow-7--의심-url-신고-submit-uri) — Google에 위협 URL 제출
+
+### 레퍼런스
 10. [파일 구조 & 함수 참조](#10-파일-구조--함수-참조)
 11. [CLI 사용 예시](#11-cli-사용-예시)
 12. [Best Practices](#12-best-practices)
@@ -56,9 +67,9 @@ graph TB
     SUSPICIOUS --> SUBMITTER
     SUBMITTER --> SUBMIT_API
 
-    style APP fill:#e3f2fd,stroke:#1565c0
-    style CLIENT fill:#fff3e0,stroke:#e65100
-    style GOOGLE fill:#e8f5e9,stroke:#2e7d32
+    style APP fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style CLIENT fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style GOOGLE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
 ```
 
 ### 왜 Update API인가? (vs Lookup API)
@@ -68,7 +79,7 @@ graph TB
 | 동작 방식 | URL을 Google 서버로 직접 전송 | 로컬 DB에서 1차 매칭 후, 매칭된 해시만 서버로 전송 |
 | 프라이버시 | Google에 검사 URL 노출 | 해시 프리픽스만 전송 (원본 URL 보호) |
 | 네트워크 | 매 검사마다 API 호출 | 대부분 로컬에서 처리 (비매칭 시 API 호출 없음) |
-| 비용 | 호출 건수에 비례 | 주기적 동기화 + 드문 SearchHashes 호출 |
+| 비용 | 호출 건수에 비례 ($0.50/1K) | 동기화 **무료** + SearchHashes ($50/1K) |
 | 적합 대상 | 프로토타입, 소량 검사 | **OEM 제품, 대량 검사, 프라이버시 중요 환경** |
 
 ### Submit URI API란?
@@ -81,6 +92,21 @@ graph TB
 | 응답 | 즉시 결과 반환 | Long Running Operation (비동기) |
 | 사전 조건 | API 활성화만 필요 | **프로젝트 allowlist 필요** (영업팀 연락) |
 | 사용 예 | 브라우저/메일 필터 | 피싱 신고 시스템, 보안 운영 자동화 |
+
+### API 과금 구조
+
+> 참조: https://cloud.google.com/web-risk/pricing
+
+| API 호출 | 과금 | 비고 |
+|---------|------|------|
+| `threatLists.computeDiff` (동기화) | **무료** (무제한) | 로컬 DB 업데이트 |
+| `hashes.search` (SearchHashes) | **$50 / 1,000회** | 로컬 매칭 후 full hash 검증 시에만 호출 |
+| `uris.search` (Lookup API) | 100K 무료, 이후 $0.50/1K | 본 클라이언트는 사용하지 않음 |
+| `SubmitUri` (URL 신고) | 별도 문의 | Google 영업팀에 문의 |
+
+> **핵심**: 동기화(`sync`)는 아무리 자주 해도 **무료**입니다.
+> 비용이 발생하는 유일한 호출은 `SearchHashes` (위협 후보 확인)이며,
+> 대부분의 URL은 로컬 매칭에서 SAFE로 판정되어 이 호출까지 가지 않습니다.
 
 ---
 
@@ -135,9 +161,9 @@ flowchart TD
     L --> N["5. 메타데이터 저장<br/><code>save_metadata()</code>"]
     M --> N
 
-    style I fill:#fff9c4,stroke:#f57f17
-    style J fill:#e8f5e9,stroke:#2e7d32
-    style K fill:#e3f2fd,stroke:#1565c0
+    style I fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
+    style J fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style K fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
 ```
 
 ### 단계별 상세
@@ -215,7 +241,8 @@ threat_hash_store.save_metadata(
 )
 ```
 
-> **⚠️ 중요**: `recommended_next_diff` 이전에 재동기화하면 API 요금만 낭비됩니다.
+> **💡 참고**: `ComputeThreatListDiff` 호출 자체는 **무료**입니다 (무제한).
+> 다만, `recommended_next_diff` 이전에 재동기화하면 변경 사항이 없어 네트워크 대역폭만 낭비됩니다.
 > `should_sync()` 함수가 이 시간을 자동으로 확인합니다.
 
 #### 3.5 동기화 결과 예시
@@ -271,10 +298,10 @@ flowchart TD
         S3A["save_cached_result()<br/>위협: expire_time까지 / 안전: 30분 TTL"]
     end
 
-    style RETURN_CACHE fill:#e8f5e9,stroke:#2e7d32
-    style SAFE fill:#e8f5e9,stroke:#2e7d32
-    style THREAT fill:#ffcdd2,stroke:#c62828
-    style S2 fill:#fff3e0,stroke:#e65100
+    style RETURN_CACHE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style SAFE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style THREAT fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
+    style S2 fill:#fff3e0,stroke:#e65100,color:#1a1a1a
 ```
 
 ### 단계별 상세
@@ -363,10 +390,10 @@ flowchart TD
     DB[("로컬 DB<br/>prefix만 저장<br/>ab12cd34 (4bytes)")]
     DB -.-> LOCAL
 
-    style MEM_FULL fill:#e3f2fd,stroke:#1565c0
-    style SERVER fill:#fff3e0,stroke:#e65100
-    style RESULT fill:#ffcdd2,stroke:#c62828
-    style DB fill:#f3e5f5,stroke:#7b1fa2
+    style MEM_FULL fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style SERVER fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style RESULT fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
+    style DB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
 ```
 
 **왜 이렇게 설계되었나?**
@@ -444,6 +471,8 @@ threat_hash_store.save_cached_result(url, is_safe, threats, expire)
 ---
 
 ## 5. Workflow 3 — URL 정규화 (Canonicalization)
+
+> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
 
 Google 스펙에 따른 URL 정규화 과정입니다. 같은 웹페이지를 가리키는 다양한 URL 변형을 하나의 표준 형태로 통일합니다.
 
@@ -559,6 +588,8 @@ def _percent_escape(url: str) -> str:
 
 ## 6. Workflow 4 — Suffix/Prefix Expression 생성
 
+> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
+
 정규화된 URL에서 **호스트 접미사 × 경로 접두사** 조합을 생성합니다. 최대 30개.
 
 ### 호스트 접미사 생성 규칙 (`_generate_host_suffixes`)
@@ -657,6 +688,8 @@ except ValueError:
 
 ## 7. Workflow 5 — SHA-256 해시 계산
 
+> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
+
 각 suffix/prefix expression을 SHA-256으로 해싱합니다.
 
 ```python
@@ -732,9 +765,9 @@ flowchart TD
     H --> I
     I --> B
 
-    style C fill:#e8f5e9,stroke:#2e7d32
-    style E fill:#e8f5e9,stroke:#2e7d32
-    style H fill:#ffcdd2,stroke:#c62828
+    style C fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style E fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style H fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
 ```
 
 ---
@@ -787,11 +820,11 @@ flowchart TD
     N -->|"FAILED / CANCELLED"| P["❌ 신고 실패"]
     N -->|"CLOSED"| Q["🔒 처리 완료 (중복 등)"]
 
-    style BUILD fill:#e3f2fd,stroke:#1565c0
-    style I fill:#e8f5e9,stroke:#2e7d32
-    style O fill:#e8f5e9,stroke:#2e7d32
-    style P fill:#ffcdd2,stroke:#c62828
-    style Q fill:#fff9c4,stroke:#f57f17
+    style BUILD fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style I fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style O fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style P fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
+    style Q fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
 ```
 
 ### 단계별 상세
@@ -857,10 +890,10 @@ graph TD
     TD --> PLAT["platform<br/>MACOS"]
     TD --> RC["region_codes<br/>['US', 'KR']"]
 
-    style REQ fill:#fff3e0,stroke:#e65100
-    style TI fill:#e3f2fd,stroke:#1565c0
-    style TD fill:#e8f5e9,stroke:#2e7d32
-    style SUB fill:#f3e5f5,stroke:#7b1fa2
+    style REQ fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style TI fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style TD fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style SUB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
 ```
 
 #### 9.3 Enum 값 참조
@@ -1250,7 +1283,7 @@ Submitting: http://malware-drop.example/payload.exe
 
 | Practice | 설명 |
 |----------|------|
-| **`recommended_next_diff` 준수** | API 응답의 권장 시각 전에 재요청하지 마세요. 불필요한 비용 발생. |
+| **`recommended_next_diff` 준수** | 동기화(`computeDiff`) 자체는 무료이지만, 권장 시각 전에 재요청하면 변경 사항 없이 대역폭만 낭비됩니다. |
 | **version_token 보존** | 토큰이 유실되면 전체 RESET이 발생해 대역폭을 낭비합니다. |
 | **주기적 동기화 스케줄링** | cron 또는 스케줄러로 `sync`를 자동 실행하세요. |
 | **DIFF 실패 시 RESET 대비** | 토큰이 만료되면 서버가 자동으로 RESET을 반환합니다. |
@@ -1259,9 +1292,9 @@ Submitting: http://malware-drop.example/payload.exe
 
 | Practice | 설명 |
 |----------|------|
-| **캐시 활용** | 동일 URL 반복 검사 시 `use_cache=True` (기본값)로 API 비용 절감. |
+| **캐시 활용** | 동일 URL 반복 검사 시 `use_cache=True` (기본값)로 SearchHashes 호출 절감 ($50/1K회). |
 | **동기화 선행** | 검사 전 로컬 DB가 비어있으면 자동으로 `sync_all()`이 호출됩니다. |
-| **SearchHashes 최소화** | 대부분의 URL은 로컬 매칭에서 SAFE로 판정됩니다. API 호출은 드뭅니다. |
+| **SearchHashes 최소화** | 대부분의 URL은 로컬 매칭에서 SAFE로 판정됩니다. 유료인 SearchHashes 호출은 드뭅니다. |
 
 ### URL 정규화 관련
 
