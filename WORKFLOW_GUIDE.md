@@ -74,12 +74,12 @@ graph TB
 
 ### 왜 Update API인가? (vs Lookup API)
 
-| 항목 | Lookup API (`uris.search`) | Update API (`ComputeThreatListDiff` + `SearchHashes`) |
-|-----|---------------------------|------------------------------------------------------|
-| 동작 방식 | URL을 Google 서버로 직접 전송 | 로컬 DB에서 1차 매칭 후, 매칭된 해시만 서버로 전송 |
+| 항목 | Lookup API | Update API |
+|-----|-----------|------------|
+| 호출 방식 | `uris.search` — URL 직접 전송 | `hashes.search` — 해시 프리픽스만 전송 |
+| 로컬 DB | 없음 | `computeDiff`로 동기화 (무료) |
 | 프라이버시 | Google에 검사 URL 노출 | 해시 프리픽스만 전송 (원본 URL 보호) |
 | 네트워크 | 매 검사마다 API 호출 | 대부분 로컬에서 처리 (비매칭 시 API 호출 없음) |
-| 비용 | 호출 건수에 비례 ($0.50/1K) | 동기화 **무료** + SearchHashes ($50/1K) |
 | 적합 대상 | 프로토타입, 소량 검사 | **OEM 제품, 대량 검사, 프라이버시 중요 환경** |
 
 ### Submit URI API란?
@@ -97,15 +97,30 @@ graph TB
 
 > 참조: https://cloud.google.com/web-risk/pricing
 
-| API 호출 | 과금 | 비고 |
-|---------|------|------|
-| `threatLists.computeDiff` (동기화) | **무료** (무제한) | 로컬 DB 업데이트 |
-| `hashes.search` (SearchHashes) | **$50 / 1,000회** | 로컬 매칭 후 full hash 검증 시에만 호출 |
-| `uris.search` (Lookup API) | 100K 무료, 이후 $0.50/1K | 본 클라이언트는 사용하지 않음 |
-| `SubmitUri` (URL 신고) | 별도 문의 | Google 영업팀에 문의 |
+Google은 API 사용 패턴에 따라 **4가지 과금 카테고리**를 구분합니다:
+
+| 카테고리 | 호출 유형 | 월 1~100K | 월 100K~10M | 월 10M 이상 |
+|---------|----------|----------|------------|------------|
+| **① Lookup API** | `uris.search` | **무료** | $0.50 / 1K회 | 영업팀 문의 |
+| **② Lookup + Update API** | `uris.search` (위협 확인) | $50 / 1K회 | 영업팀 문의 | — |
+| | `computeDiff` (로컬 DB 업데이트) | **무료** | **무료** | **무료** |
+| **③ Update API** | `hashes.search` (위협 확인) | $50 / 1K회 | 영업팀 문의 | — |
+| | `computeDiff` (로컬 DB 업데이트) | **무료** | **무료** | **무료** |
+| **④ Submission API** | `submitUri` | 영업팀 문의 | — | — |
+
+> **⚠️ 주의**: `computeDiff`를 한 번이라도 호출하면, `uris.search` 가격이
+> $0.50/1K → **$50/1K**로 변경됩니다 ("Lookup + Update API" 카테고리 적용).
+
+**본 클라이언트의 과금 위치:**
+
+| 사용 API | 카테고리 | 비용 |
+|---------|---------|------|
+| `computeDiff` (sync 명령) | ③ Update API | **무료** |
+| `hashes.search` (check 중 매칭 시) | ③ Update API | $50 / 1K회 |
+| `submitUri` (submit 명령) | ④ Submission API | 영업팀 문의 |
 
 > **핵심**: 동기화(`sync`)는 아무리 자주 해도 **무료**입니다.
-> 비용이 발생하는 유일한 호출은 `SearchHashes` (위협 후보 확인)이며,
+> 비용이 발생하는 유일한 호출은 `hashes.search` (위협 후보 확인)이며,
 > 대부분의 URL은 로컬 매칭에서 SAFE로 판정되어 이 호출까지 가지 않습니다.
 
 ---
