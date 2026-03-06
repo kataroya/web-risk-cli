@@ -1,45 +1,45 @@
 # Web Risk API — Workflow & Best Practice Guide
 
-> Google Cloud Web Risk API를 활용한 URL 위협 검사 및 신고 클라이언트의 전체 워크플로우를 설명합니다.
-> 각 단계별 함수 호출, 데이터 흐름, 구현 세부사항을 포함합니다.
+> Complete workflow documentation for the Google Cloud Web Risk API client.
+> Covers function call sequences, data flows, and implementation details for each stage.
 
 ---
 
-## 목차
+## Table of Contents
 
-### 개요
-1. [아키텍처 개요](#1-아키텍처-개요) — 시스템 구조, API 비교, 과금
+### Overview
+1. [Architecture Overview](#1-architecture-overview) — System structure, API comparison
 
-### 준비
-2. [사전 준비](#2-사전-준비) — GCP 설정, Python 환경
+### Setup
+2. [Prerequisites](#2-prerequisites) — GCP setup, Python environment
 
-### 핵심 워크플로우
-3. [Workflow 1 — Threat List 동기화 (Sync)](#3-workflow-1--threat-list-동기화-sync) — 로컬 DB 업데이트
-4. [Workflow 2 — URL 위협 검사 (Check)](#4-workflow-2--url-위협-검사-check) — 4단계 위협 판정
+### Core Workflows
+3. [Workflow 1 — Threat List Sync](#3-workflow-1--threat-list-sync) — Local DB update
+4. [Workflow 2 — URL Threat Check](#4-workflow-2--url-threat-check) — 4-step threat detection
 
-### 상세 참조 (Workflow 2의 내부 동작)
-5. [Workflow 3 — URL 정규화 (Canonicalization)](#5-workflow-3--url-정규화-canonicalization)
-6. [Workflow 4 — Suffix/Prefix Expression 생성](#6-workflow-4--suffixprefix-expression-생성)
-7. [Workflow 5 — SHA-256 해시 계산](#7-workflow-5--sha-256-해시-계산)
+### Detailed Reference (Workflow 2 Internals)
+5. [Workflow 3 — URL Canonicalization](#5-workflow-3--url-canonicalization)
+6. [Workflow 4 — Suffix/Prefix Expression Generation](#6-workflow-4--suffixprefix-expression-generation)
+7. [Workflow 5 — SHA-256 Hash Computation](#7-workflow-5--sha-256-hash-computation)
 
-### 부가 기능
-8. [Workflow 6 — 캐싱](#8-workflow-6--캐싱) — URL 검사 결과 캐시
-9. [Workflow 7 — 의심 URL 신고 (Submit URI)](#9-workflow-7--의심-url-신고-submit-uri) — Google에 위협 URL 제출
+### Additional Features
+8. [Workflow 6 — Caching](#8-workflow-6--caching) — URL check result cache
+9. [Workflow 7 — Suspicious URL Submission (Submit URI)](#9-workflow-7--suspicious-url-submission-submit-uri) — Report threat URLs to Google
 
-### 레퍼런스
-10. [파일 구조 & 함수 참조](#10-파일-구조--함수-참조)
-11. [CLI 사용 예시](#11-cli-사용-예시)
+### Reference
+10. [File Structure & Function Reference](#10-file-structure--function-reference)
+11. [CLI Usage Examples](#11-cli-usage-examples)
 12. [Best Practices](#12-best-practices)
 
 ---
 
-## 1. 아키텍처 개요
+## 1. Architecture Overview
 
 ```mermaid
 graph TB
-    subgraph APP["웹 애플리케이션 / OEM 제품"]
-        URL_INPUT["URL 입력"]
-        SUSPICIOUS["의심 URL 신고"]
+    subgraph APP["Web Application / OEM Product"]
+        URL_INPUT["URL Input"]
+        SUSPICIOUS["Suspicious URL Report"]
     end
 
     subgraph CLIENT["Web Risk API Client"]
@@ -72,76 +72,46 @@ graph TB
     style GOOGLE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
 ```
 
-### 왜 Update API인가? (vs Lookup API)
+### Why the Update API? (vs. Lookup API)
 
-| 항목 | Lookup API | Update API |
-|-----|-----------|------------|
-| 호출 방식 | `uris.search` — URL 직접 전송 | `hashes.search` — 해시 프리픽스만 전송 |
-| 로컬 DB | 없음 | `computeDiff`로 동기화 (무료) |
-| 프라이버시 | Google에 검사 URL 노출 | 해시 프리픽스만 전송 (원본 URL 보호) |
-| 네트워크 | 매 검사마다 API 호출 | 대부분 로컬에서 처리 (비매칭 시 API 호출 없음) |
-| 적합 대상 | 프로토타입, 소량 검사 | **OEM 제품, 대량 검사, 프라이버시 중요 환경** |
+| Aspect | Lookup API | Update API |
+|--------|-----------|------------|
+| Method | `uris.search` — sends full URL | `hashes.search` — sends hash prefix only |
+| Local DB | None | Synced via `computeDiff` (free) |
+| Privacy | Checked URL exposed to Google | Only hash prefix sent (original URL protected) |
+| Network | API call for every check | Most checks resolved locally (no API call on non-match) |
+| Best for | Prototyping, low-volume checks | **OEM products, high-volume, privacy-critical environments** |
 
-### Submit URI API란?
+### What is the Submit URI API?
 
-| 항목 | Update API (소비) | Submit URI API (기여) |
-|-----|-------------------|----------------------|
-| 데이터 방향 | Google → 클라이언트 (위협 데이터 수신) | 클라이언트 → Google (의심 URL 제출) |
-| 목적 | URL이 위협인지 **검사** | 의심 URL을 Google 블록리스트에 **추가 요청** |
-| 프라이버시 | 해시 프리픽스만 전송 | URL 전체를 Google에 전송 |
-| 응답 | 즉시 결과 반환 | Long Running Operation (비동기) |
-| 사전 조건 | API 활성화만 필요 | **프로젝트 allowlist 필요** (영업팀 연락) |
-| 사용 예 | 브라우저/메일 필터 | 피싱 신고 시스템, 보안 운영 자동화 |
-
-### API 과금 구조
-
-> 참조: https://cloud.google.com/web-risk/pricing
-
-Google은 API 사용 패턴에 따라 **4가지 과금 카테고리**를 구분합니다:
-
-| 카테고리 | 호출 유형 | 월 1~100K | 월 100K~10M | 월 10M 이상 |
-|---------|----------|----------|------------|------------|
-| **① Lookup API** | `uris.search` | **무료** | $0.50 / 1K회 | 영업팀 문의 |
-| **② Lookup + Update API** | `uris.search` (위협 확인) | $50 / 1K회 | 영업팀 문의 | — |
-| | `computeDiff` (로컬 DB 업데이트) | **무료** | **무료** | **무료** |
-| **③ Update API** | `hashes.search` (위협 확인) | $50 / 1K회 | 영업팀 문의 | — |
-| | `computeDiff` (로컬 DB 업데이트) | **무료** | **무료** | **무료** |
-| **④ Submission API** | `submitUri` | 영업팀 문의 | — | — |
-
-> **⚠️ 주의**: `computeDiff`를 한 번이라도 호출하면, `uris.search` 가격이
-> $0.50/1K → **$50/1K**로 변경됩니다 ("Lookup + Update API" 카테고리 적용).
-
-**본 클라이언트의 과금 위치:**
-
-| 사용 API | 카테고리 | 비용 |
-|---------|---------|------|
-| `computeDiff` (sync 명령) | ③ Update API | **무료** |
-| `hashes.search` (check 중 매칭 시) | ③ Update API | $50 / 1K회 |
-| `submitUri` (submit 명령) | ④ Submission API | 영업팀 문의 |
-
-> **핵심**: 동기화(`sync`)는 아무리 자주 해도 **무료**입니다.
-> 비용이 발생하는 유일한 호출은 `hashes.search` (위협 후보 확인)이며,
-> 대부분의 URL은 로컬 매칭에서 SAFE로 판정되어 이 호출까지 가지 않습니다.
+| Aspect | Update API (consume) | Submit URI API (contribute) |
+|--------|---------------------|----------------------------|
+| Data Direction | Google → Client (receive threat data) | Client → Google (submit suspicious URLs) |
+| Purpose | **Check** if a URL is a threat | **Request addition** of a suspicious URL to Google's blocklist |
+| Privacy | Only hash prefix sent | Full URL sent to Google |
+| Response | Immediate result | Long Running Operation (async) |
+| Prerequisite | API enablement only | **Project allowlist required** (contact sales) |
+| Use Cases | Browser/email filters | Phishing report systems, security operations automation |
 
 ---
 
-## 2. 사전 준비
+## 2. Prerequisites
 
-### GCP 프로젝트 설정
+### GCP Project Setup
 
 ```bash
-# Web Risk API 활성화
+# Enable the Web Risk API
 gcloud services enable webrisk.googleapis.com
 
-# 인증 설정 (둘 중 하나 선택)
-# Option A: 서비스 계정 키
+# Authentication (choose one)
+# Option A: Service Account Key
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
 
-# Option B: 개발용 기본 인증
+# Option B: Application Default Credentials (development)
 gcloud auth application-default login
 ```
 
-### Python 환경
+### Python Environment
 
 ```bash
 python -m venv .venv
@@ -151,11 +121,11 @@ pip install google-cloud-webrisk
 
 ---
 
-## 3. Workflow 1 — Threat List 동기화 (Sync)
+## 3. Workflow 1 — Threat List Sync
 
-로컬 SQLite 데이터베이스에 Google의 위협 해시 프리픽스를 동기화하는 워크플로우입니다.
+Synchronizes Google's threat hash prefixes into a local SQLite database.
 
-### 전체 흐름
+### Overall Flow
 
 ```mermaid
 flowchart TD
@@ -166,14 +136,14 @@ flowchart TD
     C --> F["sync_threat_list(threat_type)"]
     D --> F
     E --> F
-    F --> G["1. version_token 로드<br/><code>get_version_token()</code>"]
-    G --> H["2. API 호출<br/><code>compute_threat_list_diff()</code>"]
+    F --> G["1. Load version_token<br/><code>get_version_token()</code>"]
+    G --> H["2. Call API<br/><code>compute_threat_list_diff()</code>"]
     H --> I{"response_type?"}
-    I -->|RESET| J["3a. 전체 스냅샷 파싱<br/><code>_parse_raw_hashes()</code>"]
-    I -->|DIFF| K["3b. 증분 파싱<br/><code>_parse_raw_hashes()</code><br/><code>_parse_removal_indices()</code>"]
-    J --> L["4a. DB 전체 교체<br/><code>reset_prefixes()</code>"]
-    K --> M["4b. DB 증분 반영<br/><code>apply_diff()</code>"]
-    L --> N["5. 메타데이터 저장<br/><code>save_metadata()</code>"]
+    I -->|RESET| J["3a. Parse full snapshot<br/><code>_parse_raw_hashes()</code>"]
+    I -->|DIFF| K["3b. Parse incremental diff<br/><code>_parse_raw_hashes()</code><br/><code>_parse_removal_indices()</code>"]
+    J --> L["4a. Replace entire DB<br/><code>reset_prefixes()</code>"]
+    K --> M["4b. Apply incremental diff<br/><code>apply_diff()</code>"]
+    L --> N["5. Save metadata<br/><code>save_metadata()</code>"]
     M --> N
 
     style I fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
@@ -181,86 +151,86 @@ flowchart TD
     style K fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
 ```
 
-### 단계별 상세
+### Step-by-Step Details
 
-#### 3.1 version_token 로드
+#### 3.1 Load version_token
 
 ```python
 # threat_hash_store.py
 version_token = threat_hash_store.get_version_token(threat_type_value)
-# → 첫 동기화: b"" (빈 바이트)
-# → 이후 동기화: 이전에 저장된 version_token
+# → First sync: b"" (empty bytes)
+# → Subsequent syncs: previously saved version_token
 ```
 
-`version_token`은 로컬 DB의 현재 상태를 나타내는 식별자입니다.
-- **빈 값**: 데이터가 없으므로 서버에서 전체 스냅샷(RESET)을 반환
-- **이전 토큰**: 해당 시점 이후의 변경사항(DIFF)만 반환
+The `version_token` identifies the current state of the local DB.
+- **Empty**: No data exists, so the server returns a full snapshot (RESET)
+- **Previous token**: Server returns only changes since that point (DIFF)
 
-#### 3.2 ComputeThreatListDiff API 호출
+#### 3.2 ComputeThreatListDiff API Call
 
 ```python
 # threat_list_syncer.py → sync_threat_list()
 constraints = webrisk_v1.ComputeThreatListDiffRequest.Constraints(
-    max_diff_entries=65536,         # DIFF 응답의 최대 추가/삭제 항목 수
-    max_database_entries=262144,    # 로컬 DB의 최대 항목 수
-    supported_compressions=[webrisk_v1.CompressionType.RAW],  # 압축 방식
+    max_diff_entries=65536,         # Max addition/removal entries in DIFF response
+    max_database_entries=262144,    # Max entries in local DB
+    supported_compressions=[webrisk_v1.CompressionType.RAW],
 )
 
 request = webrisk_v1.ComputeThreatListDiffRequest(
     threat_type=threat_type,        # MALWARE / SOCIAL_ENGINEERING / UNWANTED_SOFTWARE
-    version_token=version_token,    # 현재 상태 토큰
+    version_token=version_token,    # Current state token
     constraints=constraints,
 )
 
 response = client.compute_threat_list_diff(request)
 ```
 
-#### 3.3 응답 처리 — RESET vs DIFF
+#### 3.3 Response Handling — RESET vs. DIFF
 
 ```python
-# response.response_type에 따라 분기
+# Branch based on response.response_type
 ```
 
-**RESET (전체 스냅샷)** — 첫 동기화 또는 토큰이 만료된 경우:
+**RESET (Full Snapshot)** — First sync or expired token:
 ```python
-# 1. 응답에서 해시 프리픽스 파싱
+# 1. Parse hash prefixes from response
 prefixes = _parse_raw_hashes(response.additions)
-#   response.additions → ThreatEntryAdditions 객체 (단일)
-#   response.additions.raw_hashes → [RawHashes, ...] (반복)
-#   각 RawHashes: { prefix_size: 4, raw_hashes: b"\xab\xcd..." }
-#   → prefix_size 단위로 잘라서 개별 프리픽스 리스트 생성
+#   response.additions → ThreatEntryAdditions object (singular)
+#   response.additions.raw_hashes → [RawHashes, ...] (repeated)
+#   Each RawHashes: { prefix_size: 4, raw_hashes: b"\xab\xcd..." }
+#   → Split by prefix_size to produce individual prefix list
 
-# 2. 기존 데이터 삭제 후 새 데이터 삽입
+# 2. Delete existing data and insert new data
 threat_hash_store.reset_prefixes(threat_type, prefixes)
 ```
 
-**DIFF (증분 업데이트)** — 일반적인 업데이트:
+**DIFF (Incremental Update)** — Normal updates:
 ```python
-# 1. 추가/삭제 파싱
+# 1. Parse additions and removals
 additions = _parse_raw_hashes(response.additions)
 removals = _parse_removal_indices(response.removals)
-#   removals: 정렬된(ascending) 프리픽스 목록에서 삭제할 인덱스 리스트
+#   removals: list of indices to delete from the sorted (ascending) prefix list
 
-# 2. 인덱스 기반 삭제 → 새 프리픽스 추가
+# 2. Remove by index, then add new prefixes
 threat_hash_store.apply_diff(threat_type, additions, removals)
 ```
 
-#### 3.4 메타데이터 저장
+#### 3.4 Save Metadata
 
 ```python
-# 새 version_token과 다음 동기화 권장 시각 저장
+# Save new version_token and recommended next sync time
 threat_hash_store.save_metadata(
     threat_type_value,
-    response.new_version_token,      # 다음 요청에 사용할 토큰
-    response.recommended_next_diff,  # 다음 동기화 권장 시각
+    response.new_version_token,      # Token for next request
+    response.recommended_next_diff,  # Recommended next sync time
 )
 ```
 
-> **💡 참고**: `ComputeThreatListDiff` 호출 자체는 **무료**입니다 (무제한).
-> 다만, `recommended_next_diff` 이전에 재동기화하면 변경 사항이 없어 네트워크 대역폭만 낭비됩니다.
-> `should_sync()` 함수가 이 시간을 자동으로 확인합니다.
+> **Note**: `ComputeThreatListDiff` calls are **free** (unlimited).
+> However, syncing before `recommended_next_diff` wastes bandwidth with no changes.
+> The `should_sync()` function automatically checks this timing.
 
-#### 3.5 동기화 결과 예시
+#### 3.5 Sync Output Example
 
 ```
 [SYNC] Syncing MALWARE...
@@ -273,44 +243,44 @@ threat_hash_store.save_metadata(
 
 ---
 
-## 4. Workflow 2 — URL 위협 검사 (Check)
+## 4. Workflow 2 — URL Threat Check
 
-URL이 위협 목록에 포함되어 있는지 검사하는 4단계 워크플로우입니다.
+A 4-step workflow to check whether a URL is listed in any threat list.
 
-### 전체 흐름
+### Overall Flow
 
 ```mermaid
 flowchart TD
-    URL["URL 입력<br/>'http://example.com/path?q=1'"] --> S0
+    URL["URL Input<br/>'http://example.com/path?q=1'"] --> S0
 
-    subgraph S0["Step 0: 캐시 확인"]
+    subgraph S0["Step 0: Cache Check"]
         S0A["get_cached_result()"]
     end
 
-    S0 -->|"HIT (미만료)"| RETURN_CACHE["즉시 반환<br/>API 호출 없음"]
+    S0 -->|"HIT (not expired)"| RETURN_CACHE["Return immediately<br/>No API call"]
     S0 -->|"MISS"| S1
 
-    subgraph S1["Step 1: 로컬 프리픽스 매칭 (네트워크 없음)"]
-        S1A["① canonicalize(url)"] --> S1B["② compute_url_hashes(url)<br/>→ full hash 리스트 (메모리 보관)"]
-        S1B --> S1C["③ lookup_prefix(full_hash)<br/>→ full hash 앞 N바이트 vs DB 프리픽스"]
+    subgraph S1["Step 1: Local Prefix Matching (no network)"]
+        S1A["① canonicalize(url)"] --> S1B["② compute_url_hashes(url)<br/>→ full hash list (held in memory)"]
+        S1B --> S1C["③ lookup_prefix(full_hash)<br/>→ first N bytes of full hash vs DB prefix"]
     end
 
-    S1 -->|"매칭 없음"| SAFE["✅ SAFE"]
-    S1 -->|"매칭 있음"| S2
+    S1 -->|"No match"| SAFE["SAFE"]
+    S1 -->|"Match found"| S2
 
-    subgraph S2["Step 2: SearchHashes API 검증"]
-        S2A["매칭된 prefix (4바이트)를<br/>Google에 전송"] --> S2B["Google이 해당 prefix의<br/>full hash 후보 목록 반환"]
-        S2B --> S2C["서버 full hash vs<br/>메모리의 full hash 비교<br/><code>threat.hash in url_hashes</code>"]
+    subgraph S2["Step 2: SearchHashes API Verification"]
+        S2A["Send matched prefix (4 bytes)<br/>to Google"] --> S2B["Google returns<br/>full hash candidate list"]
+        S2B --> S2C["Compare server full hash vs<br/>in-memory full hash<br/><code>threat.hash in url_hashes</code>"]
     end
 
-    S2 -->|"일치 없음"| SAFE
-    S2 -->|"일치 있음"| THREAT["🚨 THREAT 확정"]
+    S2 -->|"No match"| SAFE
+    S2 -->|"Match found"| THREAT["THREAT confirmed"]
 
     SAFE --> S3
     THREAT --> S3
 
-    subgraph S3["Step 3: 결과 캐싱"]
-        S3A["save_cached_result()<br/>위협: expire_time까지 / 안전: 30분 TTL"]
+    subgraph S3["Step 3: Cache Result"]
+        S3A["save_cached_result()<br/>Threat: until expire_time / Safe: 30min TTL"]
     end
 
     style RETURN_CACHE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
@@ -319,90 +289,90 @@ flowchart TD
     style S2 fill:#fff3e0,stroke:#e65100,color:#1a1a1a
 ```
 
-### 단계별 상세
+### Step-by-Step Details
 
-#### 4.0 캐시 확인 (Step 0)
+#### 4.0 Cache Check (Step 0)
 
 ```python
 # url_threat_checker.py → check_url()
 cached = threat_hash_store.get_cached_result(url)
-# → url의 SHA-256을 키로 url_check_cache 테이블 조회
-# → expire_time이 지나지 않았으면 캐시 결과 즉시 반환
-# → 만료된 경우 캐시 삭제 후 None 반환
+# → Looks up url_check_cache table by SHA-256 of the URL
+# → Returns cached result if expire_time has not passed
+# → Deletes expired entries and returns None
 ```
 
-#### 4.1 URL 정규화 & 해시 생성 (Step 1)
+#### 4.1 URL Canonicalization & Hash Generation (Step 1)
 
 ```python
-# 정규화
+# Canonicalize
 canonical = url_canonicalizer.canonicalize(url)
 # "HTTP://www.Example.com/a/../b" → "http://www.example.com/b"
 
-# suffix/prefix expression 생성 → 각각 SHA-256 해시
+# Generate suffix/prefix expressions → SHA-256 hash each
 url_hashes = url_canonicalizer.compute_url_hashes(url)
-# → 최대 30개의 32바이트 SHA-256 해시 리스트
+# → Up to 30 SHA-256 hashes (32 bytes each)
 ```
 
-#### 4.2 로컬 DB 프리픽스 매칭 (Step 1 계속)
+#### 4.2 Local DB Prefix Matching (Step 1 continued)
 
 ```python
-for full_hash in url_hashes:                    # 예: 32바이트 해시
+for full_hash in url_hashes:                    # e.g., 32-byte hash
     matched = threat_hash_store.lookup_prefix(full_hash)
-    # full_hash[:prefix_len] == stored_prefix 비교
-    # prefix_len은 DB 저장된 프리픽스 길이 (보통 4바이트)
+    # full_hash[:prefix_len] == stored_prefix
+    # prefix_len is the stored prefix length (typically 4 bytes)
 ```
 
-대부분의 URL은 여기서 **매칭 없음**으로 판정되어 네트워크 호출 없이 종료됩니다.
+Most URLs have **no match** here and are resolved as SAFE with no network call.
 
-#### 4.3 SearchHashes API 검증 (Step 2)
+#### 4.3 SearchHashes API Verification (Step 2)
 
-로컬 매칭이 있으면 false positive일 수 있으므로, Google 서버에서 full hash 목록을 받아 최종 확인합니다.
+When a local match exists, it may be a false positive. The client fetches full hash candidates from Google for final verification.
 
 ```python
 response = client.search_hashes(
-    hash_prefix=full_hash[:4],                # 4바이트 프리픽스
+    hash_prefix=full_hash[:4],                # 4-byte prefix
     threat_types=[MALWARE, SOCIAL_ENGINEERING, UNWANTED_SOFTWARE],
 )
 
 for threat in response.threats:
-    if threat.hash in url_hashes:              # 32바이트 full hash 비교
-        # ✅ 확정된 위협!
+    if threat.hash in url_hashes:              # 32-byte full hash comparison
+        # Confirmed threat!
         result["threats"].append({
             "threat_type": threat.threat_types[0].name,
             "expire_time": threat.expire_time,
         })
 ```
 
-> **프라이버시 포인트**: Google에 전송되는 것은 4바이트 해시 프리픽스뿐입니다.
-> 이 프리픽스로는 원본 URL을 역산할 수 없습니다.
+> **Privacy note**: Only a 4-byte hash prefix is sent to Google.
+> The original URL cannot be reverse-engineered from this prefix.
 
-#### 4.3.1 Full Hash 비교 상세 — "로컬 full hash"는 어디서 오는가?
+#### 4.3.1 Full Hash Comparison — Where Does the "Local Full Hash" Come From?
 
-> **핵심**: 로컬 DB에는 **full hash(32바이트)가 저장되지 않습니다.**
-> "로컬 full hash"는 검사 시점에 URL에서 **실시간으로 계산**합니다.
+> **Key insight**: The local DB does **not** store full hashes (32 bytes).
+> The "local full hash" is **computed in real-time** from the URL being checked.
 
-**해시의 출처 비교:**
+**Hash origin comparison:**
 
-| 해시 | 출처 | 크기 | DB 저장 여부 |
-|------|------|------|-------------|
-| 로컬 프리픽스 | `ComputeThreatListDiff` API 응답 → SQLite | 4~32바이트 | **저장됨** |
-| 로컬 full hash | URL에서 **실시간 계산** (`compute_url_hashes()`) | 32바이트 | 저장 안 됨 |
-| 서버 full hash | `SearchHashes` API 응답 (`threat.hash`) | 32바이트 | 저장 안 됨 |
+| Hash | Source | Size | Stored in DB? |
+|------|--------|------|---------------|
+| Local prefix | `ComputeThreatListDiff` API response → SQLite | 4–32 bytes | **Yes** |
+| Local full hash | **Computed in real-time** from URL (`compute_url_hashes()`) | 32 bytes | No |
+| Server full hash | `SearchHashes` API response (`threat.hash`) | 32 bytes | No |
 
-**동작 흐름 (코드 위치 포함):**
+**Flow with code locations:**
 
 ```mermaid
 flowchart TD
     URL["URL: 'http://evil.com/malware'"] --> CALC["compute_url_hashes()<br/><i>url_threat_checker.py L47-49</i>"]
-    CALC --> MEM_FULL["🧠 메모리에 full hash 보관<br/>[ab12cd34ef56...32bytes, ...]"]
+    CALC --> MEM_FULL["In-memory full hashes<br/>[ab12cd34ef56...32bytes, ...]"]
     MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/><i>url_threat_checker.py L53-56</i>"]
-    LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>ab12cd34 == ab12cd34 ✅"]
+    LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>ab12cd34 == ab12cd34"]
     CMP1 --> API["search_hashes(prefix=ab12cd34)<br/><i>url_threat_checker.py L72-80</i>"]
-    API --> SERVER["🧠 Google 반환 full hash 후보<br/>ab12cd34ef56...32bytes (MALWARE)<br/>ab12cd349876...32bytes (PHISHING)<br/>ab12cd3412345...32bytes (MALWARE)"]
+    API --> SERVER["Google returns full hash candidates<br/>ab12cd34ef56...32bytes (MALWARE)<br/>ab12cd349876...32bytes (PHISHING)<br/>ab12cd3412345...32bytes (MALWARE)"]
     SERVER --> CMP2["threat.hash in url_hashes<br/><i>url_threat_checker.py L86-87</i>"]
-    CMP2 --> RESULT["🚨 서버 full hash == 메모리 full hash<br/>→ 위협 확정!"]
+    CMP2 --> RESULT["Server full hash == in-memory full hash<br/>→ Threat confirmed!"]
 
-    DB[("로컬 DB<br/>prefix만 저장<br/>ab12cd34 (4bytes)")]
+    DB[("Local DB<br/>prefix only<br/>ab12cd34 (4bytes)")]
     DB -.-> LOCAL
 
     style MEM_FULL fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
@@ -411,187 +381,187 @@ flowchart TD
     style DB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
 ```
 
-**왜 이렇게 설계되었나?**
+**Why this design?**
 
-1. **로컬 DB에는 프리픽스만 저장** — Google이 보내주는 것이 프리픽스(4바이트)이므로, 이것만으로는 정확한 판별이 불가능 (false positive 가능).
-2. **Full hash는 URL에서 계산** — 검사할 URL을 정규화 → suffix/prefix expression 생성 → SHA-256 해싱하면 32바이트 full hash가 만들어짐.
-3. **SearchHashes API가 full hash를 반환** — 4바이트 프리픽스에 매칭되는 **모든** 위협의 full hash 목록을 서버가 반환. **판정은 해주지 않음.**
-4. **최종 비교는 클라이언트가 수행** — 서버가 준 full hash 중 우리가 계산한 full hash와 일치하는 것이 있으면 위협 확정.
+1. **Local DB stores only prefixes** — Google sends 4-byte prefixes, which alone cannot produce an exact match (false positives are possible).
+2. **Full hash is computed from URL** — Canonicalize the URL → generate suffix/prefix expressions → SHA-256 produces 32-byte full hashes.
+3. **SearchHashes API returns full hashes** — Google returns **all** threat full hashes matching the 4-byte prefix. **It does not make the verdict.**
+4. **Final comparison is client-side** — If any server-returned full hash matches one we computed, the URL is a confirmed threat.
 
-이 구조 덕분에 Google에는 4바이트 프리픽스만 전송되고, 원본 URL은 노출되지 않습니다.
+This design ensures only a 4-byte prefix is sent to Google, and the original URL is never exposed.
 
-#### 4.3.2 메모리 라이프사이클 — 해시 데이터는 언제 생기고 언제 사라지는가?
+#### 4.3.2 Memory Lifecycle — When Is Hash Data Created and Destroyed?
 
-`check_url()` 함수 실행 중 메모리에 존재하는 데이터와 그 생명주기:
+Data held in memory during `check_url()` execution:
 
 ```mermaid
 sequenceDiagram
-    participant U as 사용자
-    participant F as check_url() 함수
-    participant MEM as 메모리 (변수)
-    participant DB as 로컬 SQLite DB
+    participant U as User
+    participant F as check_url() function
+    participant MEM as Memory (variables)
+    participant DB as Local SQLite DB
     participant G as Google API
 
     U->>F: check_url("http://evil.com")
     activate F
 
-    Note over F,MEM: Step 1 — full hash 계산
+    Note over F,MEM: Step 1 — Compute full hashes
     F->>MEM: url_hashes = compute_url_hashes(url)
-    Note over MEM: 🧠 full hash 리스트 보관<br/>[ab12cd34...32bytes, ...]
+    Note over MEM: Full hash list held in memory<br/>[ab12cd34...32bytes, ...]
 
-    Note over F,DB: Step 1 — 로컬 프리픽스 매칭
+    Note over F,DB: Step 1 — Local prefix matching
     F->>DB: lookup_prefix(full_hash)
-    DB-->>F: 매칭됨! (prefix ab12cd34)
+    DB-->>F: Match found! (prefix ab12cd34)
 
-    Note over F,G: Step 2 — Google API 호출
+    Note over F,G: Step 2 — Google API call
     F->>G: search_hashes(prefix=ab12cd34)
-    G-->>MEM: response.threats (full hash 후보 목록)
-    Note over MEM: 🧠 서버 응답도 메모리에 보관
+    G-->>MEM: response.threats (full hash candidate list)
+    Note over MEM: Server response also held in memory
 
-    Note over F,MEM: Step 2 — full hash 비교 (메모리 내)
+    Note over F,MEM: Step 2 — Full hash comparison (in-memory)
     F->>MEM: threat.hash in url_hashes?
-    MEM-->>F: 일치! → 위협 확정
+    MEM-->>F: Match! → Threat confirmed
 
-    Note over F,DB: Step 3 — 최종 판정 결과만 DB 저장
-    F->>DB: save_cached_result(결과)
-    Note over DB: 💾 safe/threat 판정만 캐시
+    Note over F,DB: Step 3 — Only final verdict is persisted
+    F->>DB: save_cached_result(result)
+    Note over DB: Only safe/threat verdict cached
 
     F-->>U: {"safe": false, "threats": [...]}
     deactivate F
 
-    Note over MEM: 🗑️ 함수 종료 → 변수 소멸<br/>url_hashes, response 모두 해제
+    Note over MEM: Function ends → variables destroyed<br/>url_hashes, response all freed
 ```
 
-**메모리에 보관되는 데이터 정리:**
+**Summary of in-memory data:**
 
-| 데이터 | 변수명 | 생성 시점 | 소멸 시점 | DB 저장 |
-|--------|--------|----------|----------|--------|
-| URL의 full hash 리스트 | `url_hashes` | Step 1 (URL에서 계산) | 함수 종료 | ❌ |
-| 로컬 매칭 결과 | `matched_hashes` | Step 1 (DB 매칭) | 함수 종료 | ❌ |
-| Google API 응답 (full hash 후보) | `response` | Step 2 (API 호출) | 함수 종료 | ❌ |
-| 최종 판정 결과 (safe/threat) | `result` | Step 2 (비교 완료) | **캐시에 저장** | ✅ |
+| Data | Variable | Created At | Destroyed At | Persisted? |
+|------|----------|-----------|-------------|-----------|
+| URL full hash list | `url_hashes` | Step 1 (computed from URL) | Function exit | No |
+| Local match result | `matched_hashes` | Step 1 (DB matching) | Function exit | No |
+| Google API response (full hash candidates) | `response` | Step 2 (API call) | Function exit | No |
+| Final verdict (safe/threat) | `result` | Step 2 (comparison done) | **Cached in DB** | Yes |
 
-> **핵심**: 해시 값 자체는 어디에도 영구 저장되지 않습니다.
-> DB에 저장되는 것은 오직 **「이 URL이 안전한지/위협인지」라는 판정 결과**뿐입니다.
-> 다음에 같은 URL을 검사하면 캐시에서 판정 결과만 반환하고, 해시 계산은 하지 않습니다.
+> **Key point**: Hash values themselves are never permanently stored.
+> Only the **verdict** ("is this URL safe or a threat?") is persisted in the cache.
+> On subsequent checks of the same URL, only the cached verdict is returned — no hash computation needed.
 
-#### 4.4 결과 캐싱 (Step 3)
+#### 4.4 Result Caching (Step 3)
 
 ```python
-# 위협 감지: API의 expire_time까지 캐시
-# 안전 판정: 30분 TTL (SAFE_URL_CACHE_TTL)
+# Threat detected: cache until API's expire_time
+# Safe verdict: 30-minute TTL (SAFE_URL_CACHE_TTL)
 threat_hash_store.save_cached_result(url, is_safe, threats, expire)
 ```
 
 ---
 
-## 5. Workflow 3 — URL 정규화 (Canonicalization)
+## 5. Workflow 3 — URL Canonicalization
 
-> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
+> This section details the internals of [Workflow 2 (Check)](#4-workflow-2--url-threat-check) **Step 1**.
 
-Google 스펙에 따른 URL 정규화 과정입니다. 같은 웹페이지를 가리키는 다양한 URL 변형을 하나의 표준 형태로 통일합니다.
+URL canonicalization per Google's specification. Normalizes various URL forms pointing to the same webpage into a single standard representation.
 
-> 참조: https://cloud.google.com/web-risk/docs/urls-hashing
+> Reference: https://cloud.google.com/web-risk/docs/urls-hashing
 
-### 처리 순서 (7단계)
+### Processing Order (7 Steps)
 
 ```python
 # url_canonicalizer.py → canonicalize()
 
-# Step 1: 탭(0x09), CR(0x0D), LF(0x0A) 제거
+# Step 1: Remove tab (0x09), CR (0x0D), LF (0x0A)
 url = _remove_tab_cr_lf(url)
 # "http://goo\tgle.com" → "http://google.com"
 
-# Step 2: 프래그먼트(#...) 제거
+# Step 2: Remove fragment (#...)
 url = url.split("#")[0]
 # "http://google.com/page#section" → "http://google.com/page"
 
-# Step 3: 반복 percent-unescape (변화 없을 때까지)
+# Step 3: Repeatedly percent-unescape until stable
 url = _unescape_until_stable(url)
 # "http://example.com/%2541" → "%25" → "%" → "%41" → "A"
-# 즉 다중 인코딩된 URL을 완전히 디코딩
+# i.e., fully decode multi-encoded URLs
 
-# Step 4: 스킴이 없으면 http:// 추가
+# Step 4: Add scheme if missing
 if not url.startswith(("http://", "https://")):
     url = "http://" + url
 
-# Step 5: 호스트 정규화 (_normalize_host)
-#   ① 선행/후행 점(.) 제거, 연속 점 합치기
-#   ② IDN(국제화 도메인) → Punycode 변환
-#   ③ 소문자 변환
-#   ④ IP 주소 정규화 (8진수/16진수/축약형 처리)
+# Step 5: Normalize host (_normalize_host)
+#   ① Strip leading/trailing dots, collapse consecutive dots
+#   ② IDN (Internationalized Domain Name) → Punycode
+#   ③ Convert to lowercase
+#   ④ Normalize IP addresses (octal/hex/shorthand handling)
 
-# Step 6: 경로 정규화 (_normalize_path)
-#   ① /../ 와 /./ 해석
-#   ② 연속 슬래시(//) 합치기
+# Step 6: Normalize path (_normalize_path)
+#   ① Resolve /../ and /./
+#   ② Collapse consecutive slashes (//)
 
-# Step 7: 특수 문자 percent-escape
+# Step 7: Percent-escape special characters
 url = _percent_escape(url)
-# ASCII ≤ 32, ≥ 127, '#', '%' → %XX (대문자 hex)
+# ASCII ≤ 32, ≥ 127, '#', '%' → %XX (uppercase hex)
 ```
 
-### 호스트 정규화 상세 (`_normalize_host`)
+### Host Normalization Details (`_normalize_host`)
 
-#### IDN (국제화 도메인) → Punycode 변환
+#### IDN (Internationalized Domain Name) → Punycode
 
 ```python
 # "münchen.de" → "xn--mnchen-3ya.de"
 host = host.encode("idna").decode("ascii")
 ```
 
-한글, 독일어 움라우트 등 비ASCII 도메인을 ASCIl 호환 형태로 변환합니다.
+Converts non-ASCII domains (Korean, German umlauts, etc.) to ASCII-compatible form.
 
-#### IP 주소 정규화 (`_parse_ip_octal_hex`)
+#### IP Address Normalization (`_parse_ip_octal_hex`)
 
-다양한 IP 표현 형식을 표준 dotted-decimal로 통일합니다:
+Normalizes various IP representations to standard dotted-decimal:
 
-| 입력 형식 | 예시 | 결과 |
-|----------|------|------|
-| 표준 4옥텟 | `127.0.0.1` | `127.0.0.1` |
-| 8진수 | `0177.0.0.01` | `127.0.0.1` |
-| 16진수 | `0x7f.0x0.0x0.0x1` | `127.0.0.1` |
-| 32비트 정수 | `2130706433` | `127.0.0.1` |
-| 3-컴포넌트 | `127.0.1` | `127.0.0.1` |
-| 16진수 정수 | `0x7f000001` | `127.0.0.1` |
+| Input Format | Example | Result |
+|-------------|---------|--------|
+| Standard 4-octet | `127.0.0.1` | `127.0.0.1` |
+| Octal | `0177.0.0.01` | `127.0.0.1` |
+| Hexadecimal | `0x7f.0x0.0x0.0x1` | `127.0.0.1` |
+| 32-bit integer | `2130706433` | `127.0.0.1` |
+| 3-component | `127.0.1` | `127.0.0.1` |
+| Hex integer | `0x7f000001` | `127.0.0.1` |
 
 ```python
-# _parse_ip_octal_hex() 내부 로직
+# _parse_ip_octal_hex() internal logic
 parts = host.split(".")
-# 각 파트를 0x → 16진수, 0으로 시작 → 8진수, 그 외 → 10진수로 파싱
+# Parse each part: 0x → hex, leading 0 → octal, else → decimal
 
-# 컴포넌트 수에 따라 32비트 정수로 변환:
-#   1개: 전체가 32비트 값
-#   2개: a.b → a를 상위 8비트, b를 하위 24비트
-#   3개: a.b.c → a.b를 상위 16비트, c를 하위 16비트
-#   4개: 일반적인 a.b.c.d
+# Convert to 32-bit integer based on component count:
+#   1 part:  entire value is 32-bit
+#   2 parts: a.b → a is top 8 bits, b is lower 24 bits
+#   3 parts: a.b.c → a.b is top 16 bits, c is lower 16 bits
+#   4 parts: standard a.b.c.d
 
-# struct.pack("!I", ip_int)로 4바이트 변환 후 dotted-decimal 생성
+# struct.pack("!I", ip_int) → 4 bytes → dotted-decimal string
 ```
 
-### Percent-escape 상세 (`_percent_escape`)
+### Percent-Escape Details (`_percent_escape`)
 
-정규화 마지막 단계에서 특수 문자를 percent-encoding합니다:
+Final canonicalization step — percent-encodes special characters:
 
 ```python
 def _percent_escape(url: str) -> str:
     for char in url:
         code = ord(char)
         if code <= 32 or code >= 127 or char in ("#", "%"):
-            # → "%XX" (대문자 hex)
+            # → "%XX" (uppercase hex)
             result.append(f"%{code:02X}")
 ```
 
-| 대상 | 이유 |
-|-----|------|
-| ASCII ≤ 32 (스페이스, 제어문자) | URL에 허용되지 않는 문자 |
-| ASCII ≥ 127 (비ASCII) | UTF-8 바이트로 인코딩 |
-| `#` | 프래그먼트 구분자 |
-| `%` | 이미 이스케이프된 시퀀스와 충돌 방지 |
+| Target | Reason |
+|--------|--------|
+| ASCII ≤ 32 (space, control chars) | Not allowed in URLs |
+| ASCII ≥ 127 (non-ASCII) | Encoded as UTF-8 bytes |
+| `#` | Fragment separator |
+| `%` | Prevents collision with existing escape sequences |
 
-### 정규화 예시
+### Canonicalization Examples
 
-| 입력 | 출력 |
-|------|------|
+| Input | Output |
+|-------|--------|
 | `HTTP://www.Example.com/` | `http://www.example.com/` |
 | `http://google.com/a/../b` | `http://google.com/b` |
 | `http://google.com/page#frag` | `http://google.com/page` |
@@ -601,64 +571,64 @@ def _percent_escape(url: str) -> str:
 
 ---
 
-## 6. Workflow 4 — Suffix/Prefix Expression 생성
+## 6. Workflow 4 — Suffix/Prefix Expression Generation
 
-> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
+> This section details the internals of [Workflow 2 (Check)](#4-workflow-2--url-threat-check) **Step 1**.
 
-정규화된 URL에서 **호스트 접미사 × 경로 접두사** 조합을 생성합니다. 최대 30개.
+Generates **host suffix × path prefix** combinations from the canonicalized URL. Up to 30 total.
 
-### 호스트 접미사 생성 규칙 (`_generate_host_suffixes`)
+### Host Suffix Generation Rules (`_generate_host_suffixes`)
 
-최대 **5개**:
-1. 정확한 호스트명
-2. 뒤에서 5개 구성요소부터 시작해 앞쪽을 하나씩 제거 (최대 4개 추가)
+Up to **5** entries:
+1. The exact hostname
+2. Starting from the last 5 components, successively remove the leading component (up to 4 additional)
 
 ```
-예: a.b.c.d.e.f.g
-  → a.b.c.d.e.f.g   (전체)
-  → c.d.e.f.g        (뒤 5개 = 마지막 5개 구성요소)
+Example: a.b.c.d.e.f.g
+  → a.b.c.d.e.f.g   (exact)
+  → c.d.e.f.g        (last 5 components)
   → d.e.f.g
   → e.f.g
   → f.g
-  ※ b.c.d.e.f.g 는 건너뜀 (뒤 5개 규칙)
+  ※ b.c.d.e.f.g is skipped (last-5 rule)
 ```
 
-> **⚠️ IP 주소인 경우**: 정확한 호스트(IP)만 사용, 추가 접미사 생성하지 않음.
+> **IP addresses**: Only the exact host (IP) is used; no additional suffixes are generated.
 
 ```python
-# IP 주소 판별
+# IP address detection
 try:
     ipaddress.ip_address(host)
-    return [host]  # 추가 접미사 없음
+    return [host]  # No additional suffixes
 except ValueError:
-    pass  # 도메인이므로 접미사 생성 진행
+    pass  # It's a domain, proceed with suffix generation
 ```
 
-### 경로 접두사 생성 규칙 (`_generate_path_prefixes`)
+### Path Prefix Generation Rules (`_generate_path_prefixes`)
 
-최대 **6개**:
-1. 전체 경로 + 쿼리 파라미터
-2. 전체 경로 (쿼리 제외)
-3. `/`부터 시작해 경로 구성요소를 하나씩 추가 (각각 trailing `/` 포함)
+Up to **6** entries:
+1. Full path + query parameters
+2. Full path (without query)
+3. Starting from `/`, add path components one at a time (each with trailing `/`)
 
 ```
-예: /1/2/3.html?param=1
-  → /1/2/3.html?param=1   (전체 + 쿼리)
-  → /1/2/3.html            (전체, 쿼리 제외)
-  → /                       (루트)
+Example: /1/2/3.html?param=1
+  → /1/2/3.html?param=1   (full + query)
+  → /1/2/3.html            (full, no query)
+  → /                       (root)
   → /1/
   → /1/2/
 ```
 
-### 조합 예시
+### Combination Examples
 
-#### 예 1: `http://a.b.c/1/2.html?param=1`
+#### Example 1: `http://a.b.c/1/2.html?param=1`
 
 ```
-호스트 접미사: [a.b.c, b.c]
-경로 접두사:   [/1/2.html?param=1, /1/2.html, /, /1/]
+Host suffixes: [a.b.c, b.c]
+Path prefixes: [/1/2.html?param=1, /1/2.html, /, /1/]
 
-조합 결과 (8개):
+Combinations (8):
   a.b.c/1/2.html?param=1
   a.b.c/1/2.html
   a.b.c/
@@ -669,13 +639,13 @@ except ValueError:
   b.c/1/
 ```
 
-#### 예 2: `http://a.b.c.d.e.f.g/1.html`
+#### Example 2: `http://a.b.c.d.e.f.g/1.html`
 
 ```
-호스트 접미사: [a.b.c.d.e.f.g, c.d.e.f.g, d.e.f.g, e.f.g, f.g]
-경로 접두사:   [/1.html, /]
+Host suffixes: [a.b.c.d.e.f.g, c.d.e.f.g, d.e.f.g, e.f.g, f.g]
+Path prefixes: [/1.html, /]
 
-조합 결과 (10개):
+Combinations (10):
   a.b.c.d.e.f.g/1.html
   a.b.c.d.e.f.g/
   c.d.e.f.g/1.html
@@ -688,36 +658,36 @@ except ValueError:
   f.g/
 ```
 
-#### 예 3: `http://1.2.3.4/1/` (IP 주소)
+#### Example 3: `http://1.2.3.4/1/` (IP address)
 
 ```
-호스트 접미사: [1.2.3.4]  ← IP이므로 추가 접미사 없음
-경로 접두사:   [/1/, /]
+Host suffixes: [1.2.3.4]  ← IP, no additional suffixes
+Path prefixes: [/1/, /]
 
-조합 결과 (2개):
+Combinations (2):
   1.2.3.4/1/
   1.2.3.4/
 ```
 
 ---
 
-## 7. Workflow 5 — SHA-256 해시 계산
+## 7. Workflow 5 — SHA-256 Hash Computation
 
-> 📌 이 섹션은 [Workflow 2 (Check)](#4-workflow-2--url-위협-검사-check)의 **Step 1 내부 동작**을 상세히 설명합니다.
+> This section details the internals of [Workflow 2 (Check)](#4-workflow-2--url-threat-check) **Step 1**.
 
-각 suffix/prefix expression을 SHA-256으로 해싱합니다.
+Each suffix/prefix expression is hashed with SHA-256.
 
 ```python
 # url_canonicalizer.py → compute_url_hashes()
 expressions = generate_url_expressions(url)
 hashes = [hashlib.sha256(expr.encode("utf-8")).digest() for expr in expressions]
-# → 각 expression → UTF-8 바이트 → SHA-256 → 32바이트 digest
+# → Each expression → UTF-8 bytes → SHA-256 → 32-byte digest
 ```
 
-### 해시 프리픽스 매칭
+### Hash Prefix Matching
 
-로컬 DB에는 API에서 받은 **4~32바이트 해시 프리픽스**가 저장되어 있습니다.
-매칭 시 full hash의 앞 N바이트와 DB의 프리픽스(N바이트)를 비교합니다.
+The local DB stores **4–32 byte hash prefixes** received from the API.
+Matching compares the first N bytes of the full hash against the stored N-byte prefix.
 
 ```python
 # threat_hash_store.py → lookup_prefix()
@@ -732,51 +702,51 @@ def lookup_prefix(hash_prefix: bytes) -> list[int]:
 Full SHA-256 (32 bytes):  ba7816bf 8f01cfea 414140de 5dae2223 ...
 DB Prefix (4 bytes):      ba7816bf
                           ^^^^^^^^
-                          이 부분만 비교
+                          Only this part is compared
 ```
 
-> **참고**: 프리픽스 길이는 Google API가 `ComputeThreatListDiff` 응답의
-> `prefix_size` 필드에서 지정합니다. 클라이언트가 직접 결정하지 않습니다.
+> **Note**: Prefix length is specified by Google's API in the `ComputeThreatListDiff` response's
+> `prefix_size` field. The client does not choose this value.
 
 ---
 
-## 8. Workflow 6 — 캐싱
+## 8. Workflow 6 — Caching
 
-반복 검사 시 불필요한 API 호출을 방지하기 위해 결과를 캐싱합니다.
+Caches URL check results to prevent unnecessary API calls on repeated checks.
 
-### 캐시 테이블 구조
+### Cache Table Schema
 
 ```sql
 CREATE TABLE url_check_cache (
-    url_sha256    BLOB    PRIMARY KEY,  -- URL의 SHA-256 (검색 키)
-    url           TEXT    NOT NULL,     -- 원본 URL
-    is_safe       INTEGER NOT NULL,     -- 1: 안전, 0: 위협
-    threats_json  TEXT,                 -- 위협 정보 JSON
-    expire_time   TEXT    NOT NULL,     -- 만료 시각 (ISO 8601)
-    checked_at    TEXT    NOT NULL      -- 검사 시각
+    url_sha256    BLOB    PRIMARY KEY,  -- SHA-256 of the URL (lookup key)
+    url           TEXT    NOT NULL,     -- Original URL
+    is_safe       INTEGER NOT NULL,     -- 1: safe, 0: threat
+    threats_json  TEXT,                 -- Threat info JSON
+    expire_time   TEXT    NOT NULL,     -- Expiration (ISO 8601)
+    checked_at    TEXT    NOT NULL      -- Check timestamp
 );
 ```
 
-### 캐시 TTL 정책
+### Cache TTL Policy
 
-| 결과 | TTL | 근거 |
-|-----|-----|------|
-| 위협 감지 | SearchHashes API의 `expire_time` | 서버가 지정한 만료 시각 |
-| 안전 | 30분 (`SAFE_URL_CACHE_TTL`) | 합리적 기본값 |
+| Result | TTL | Rationale |
+|--------|-----|-----------|
+| Threat detected | SearchHashes API's `expire_time` | Server-specified expiration |
+| Safe | 30 minutes (`SAFE_URL_CACHE_TTL`) | Reasonable default |
 
-### 캐시 흐름
+### Cache Flow
 
 ```mermaid
 flowchart TD
-    A["check_url('http://example.com')"] --> B{"캐시 조회"}
-    B -->|"HIT (미만료)"| C["즉시 반환<br/>API 호출 0회"]
-    B -->|"MISS or 만료"| D{"로컬 프리픽스 매칭"}
-    D -->|"매칭 없음"| E["SAFE 캐시 저장<br/>(30분 TTL)"]
-    D -->|"매칭 있음"| F["SearchHashes API"]
-    F --> G{"full hash 일치?"}
-    G -->|"일치"| H["THREAT 캐시 저장<br/>(expire_time)"]
-    G -->|"불일치"| E
-    E --> I["다음 동일 URL 검사 시"]
+    A["check_url('http://example.com')"] --> B{"Cache lookup"}
+    B -->|"HIT (not expired)"| C["Return immediately<br/>0 API calls"]
+    B -->|"MISS or expired"| D{"Local prefix matching"}
+    D -->|"No match"| E["Cache as SAFE<br/>(30min TTL)"]
+    D -->|"Match found"| F["SearchHashes API"]
+    F --> G{"Full hash match?"}
+    G -->|"Match"| H["Cache as THREAT<br/>(until expire_time)"]
+    G -->|"No match"| E
+    E --> I["Next check of same URL"]
     H --> I
     I --> B
 
@@ -787,36 +757,36 @@ flowchart TD
 
 ---
 
-## 9. Workflow 7 — 의심 URL 신고 (Submit URI)
+## 9. Workflow 7 — Suspicious URL Submission (Submit URI)
 
-Google Web Risk의 **SubmitUri API**를 사용하여 의심 URL을 Google Safe Browsing 블록리스트에 추가 요청하는 워크플로우입니다.
+Uses Google Web Risk's **SubmitUri API** to request addition of a suspicious URL to Google's Safe Browsing blocklist.
 
-> **⚠️ 사전 조건**: SubmitUri API를 사용하려면 GCP 프로젝트가 **allowlist**에 등록되어야 합니다.
-> Google Cloud 영업팀 또는 Customer Engineer에게 연락하여 등록을 요청하세요.
+> **Prerequisite**: The SubmitUri API requires the GCP project to be on an **allowlist**.
+> Contact your Google Cloud sales representative or Customer Engineer.
 
-### Update API와의 차이
+### Difference from the Update API
 
 ```
-Update API (Workflow 1-6):
-  Google ──→ 클라이언트     (위협 데이터를 "소비")
-  방향: 다운로드 / 검사
+Update API (Workflows 1-6):
+  Google ──→ Client     (consumes threat data)
+  Direction: download / check
 
 Submit URI (Workflow 7):
-  클라이언트 ──→ Google     (위협 데이터를 "기여")
-  방향: 업로드 / 신고
+  Client ──→ Google     (contributes threat data)
+  Direction: upload / report
 ```
 
-- **Update API**: Google이 관리하는 위협 목록을 로컬에 동기화하고, URL이 목록에 있는지 확인
-- **Submit URI**: 아직 목록에 없지만 의심되는 URL을 Google에 제출하여 검토 요청
+- **Update API**: Syncs Google's threat lists locally, checks if a URL is listed
+- **Submit URI**: Submits a URL not yet in the list for Google to review
 
-### 전체 흐름
+### Overall Flow
 
 ```mermaid
 flowchart TD
-    A["사용자 / 보안 시스템<br/>의심 URL 발견"] --> B["webrisk_cli.py<br/>cmd_submit()"]
+    A["User / Security System<br/>Discovers suspicious URL"] --> B["webrisk_cli.py<br/>cmd_submit()"]
     B --> C["url_submitter.py<br/>submit_uri()"]
 
-    subgraph BUILD["요청 객체 구성"]
+    subgraph BUILD["Build Request Object"]
         C --> D["① Submission<br/>uri='http://phishing.example'"]
         D --> E["② ThreatInfo<br/>abuse_type, confidence,<br/>justification"]
         E --> F["③ ThreatDiscovery<br/>platform, region_codes"]
@@ -825,15 +795,15 @@ flowchart TD
 
     G --> H["⑤ client.submit_uri(request)"]
     H --> I["Google Web Risk API"]
-    I --> J["Long Running Operation<br/>(비동기 처리)"]
-    J --> K{"⑥ --wait 옵션?"}
-    K -->|"아니오"| L["Operation name 반환<br/>사용자가 나중에 확인"]
-    K -->|"예"| M["poll_operation()<br/>주기적 상태 확인"]
-    M --> N{"상태 확인"}
+    I --> J["Long Running Operation<br/>(async processing)"]
+    J --> K{"⑥ --wait flag?"}
+    K -->|"No"| L["Return Operation name<br/>User can check later"]
+    K -->|"Yes"| M["poll_operation()<br/>Periodic status check"]
+    M --> N{"Status?"}
     N -->|"RUNNING"| M
-    N -->|"SUCCEEDED"| O["✅ 신고 완료<br/>Google 블록리스트에 반영됨"]
-    N -->|"FAILED / CANCELLED"| P["❌ 신고 실패"]
-    N -->|"CLOSED"| Q["🔒 처리 완료 (중복 등)"]
+    N -->|"SUCCEEDED"| O["Submission complete<br/>Added to Google's blocklist"]
+    N -->|"FAILED / CANCELLED"| P["Submission failed"]
+    N -->|"CLOSED"| Q["Processing complete (e.g., duplicate)"]
 
     style BUILD fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
     style I fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
@@ -842,19 +812,19 @@ flowchart TD
     style Q fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
 ```
 
-### 단계별 상세
+### Step-by-Step Details
 
-#### 9.1 요청 객체 구성
+#### 9.1 Build Request Object
 
-SubmitUri API는 여러 중첩된 protobuf 메시지로 요청을 구성합니다:
+The SubmitUri API uses several nested protobuf messages:
 
 ```python
 # url_submitter.py → submit_uri()
 
-# ① Submission — 제출할 URL
+# ① Submission — the URL to submit
 submission = webrisk_v1.Submission(uri="http://phishing.example")
 
-# ② ThreatInfo — 위협 분류 정보
+# ② ThreatInfo — threat classification
 threat_info = webrisk_v1.ThreatInfo(
     abuse_type=webrisk_v1.ThreatInfo.AbuseType.SOCIAL_ENGINEERING,
     threat_confidence=webrisk_v1.ThreatInfo.Confidence(
@@ -866,13 +836,13 @@ threat_info = webrisk_v1.ThreatInfo(
     ),
 )
 
-# ③ ThreatDiscovery — 발견 환경 정보 (선택사항)
+# ③ ThreatDiscovery — discovery context (optional)
 threat_discovery = webrisk_v1.ThreatDiscovery(
     platform=webrisk_v1.ThreatDiscovery.Platform.MACOS,
     region_codes=["US", "KR"],
 )
 
-# ④ SubmitUriRequest — 최종 요청
+# ④ SubmitUriRequest — final request
 request = webrisk_v1.SubmitUriRequest(
     parent="projects/my-project-123",
     submission=submission,
@@ -881,7 +851,7 @@ request = webrisk_v1.SubmitUriRequest(
 )
 ```
 
-#### 9.2 요청 객체 구조도
+#### 9.2 Request Object Structure
 
 ```mermaid
 graph TD
@@ -900,7 +870,7 @@ graph TD
     TC --> CL["level<br/>MEDIUM"]
 
     TJ --> LABELS["labels<br/>[USER_REPORT]"]
-    TJ --> COMMENTS["comments<br/>['설명 텍스트']"]
+    TJ --> COMMENTS["comments<br/>['description text']"]
 
     TD --> PLAT["platform<br/>MACOS"]
     TD --> RC["region_codes<br/>['US', 'KR']"]
@@ -911,45 +881,45 @@ graph TD
     style SUB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
 ```
 
-#### 9.3 Enum 값 참조
+#### 9.3 Enum Reference
 
-**AbuseType** (위협 유형):
+**AbuseType** (Threat Type):
 
-| 값 | 설명 |
-|---|------|
-| `MALWARE` | 악성 소프트웨어 배포 |
-| `SOCIAL_ENGINEERING` | 피싱 및 기만적 사이트 |
-| `UNWANTED_SOFTWARE` | 원치 않는 소프트웨어 |
+| Value | Description |
+|-------|-------------|
+| `MALWARE` | Malicious software distribution |
+| `SOCIAL_ENGINEERING` | Phishing and deceptive sites |
+| `UNWANTED_SOFTWARE` | Unwanted software distribution |
 
-> **참고**: `ThreatInfo.AbuseType`은 `ThreatType`과 다른 enum입니다.
-> `SOCIAL_ENGINEERING_EXTENDED_COVERAGE`는 AbuseType에 포함되지 않습니다.
+> **Note**: `ThreatInfo.AbuseType` is a different enum from `ThreatType`.
+> `SOCIAL_ENGINEERING_EXTENDED_COVERAGE` is not available in AbuseType.
 
-**ConfidenceLevel** (신뢰도):
+**ConfidenceLevel**:
 
-| 값 | 설명 |
-|---|------|
-| `LOW` | 자동 탐지, 낮은 확신 |
-| `MEDIUM` | 자동 탐지 + 일부 수동 확인 |
-| `HIGH` | 수동 검증 완료, 높은 확신 |
+| Value | Description |
+|-------|-------------|
+| `LOW` | Automated detection, low certainty |
+| `MEDIUM` | Automated detection + some manual review |
+| `HIGH` | Manual verification completed, high certainty |
 
-**JustificationLabel** (신고 근거):
+**JustificationLabel**:
 
-| 값 | 설명 |
-|---|------|
-| `MANUAL_VERIFICATION` | 보안 전문가가 수동으로 확인 |
-| `USER_REPORT` | 최종 사용자가 신고 |
-| `AUTOMATED_REPORT` | 자동화된 시스템이 탐지 |
+| Value | Description |
+|-------|-------------|
+| `MANUAL_VERIFICATION` | Security expert manually confirmed |
+| `USER_REPORT` | End user reported |
+| `AUTOMATED_REPORT` | Automated system detected |
 
-**Platform** (발견 플랫폼):
+**Platform**:
 
-| 값 | 설명 |
-|---|------|
-| `ANDROID` | Android 환경 |
-| `IOS` | iOS 환경 |
-| `MACOS` | macOS 환경 |
-| `WINDOWS` | Windows 환경 |
+| Value | Description |
+|-------|-------------|
+| `ANDROID` | Android environment |
+| `IOS` | iOS environment |
+| `MACOS` | macOS environment |
+| `WINDOWS` | Windows environment |
 
-#### 9.4 API 호출 및 Long Running Operation
+#### 9.4 API Call and Long Running Operation
 
 ```python
 # url_submitter.py → submit_uri()
@@ -958,177 +928,177 @@ operation = client.submit_uri(request=request)
 # → operation.operation.name: "projects/{id}/operations/{op_id}"
 ```
 
-SubmitUri는 **Long Running Operation (LRO)**을 반환합니다:
-- Google이 제출된 URL을 검토하는 데 수 분~수 시간이 걸릴 수 있음
-- 즉시 결과를 반환하지 않고, 나중에 상태를 조회할 수 있는 Operation 식별자를 반환
+SubmitUri returns a **Long Running Operation (LRO)**:
+- Google may take minutes to hours to review the submitted URL
+- Instead of returning an immediate result, it returns an Operation identifier for later status checks
 
-#### 9.5 Operation 상태 추적
+#### 9.5 Operation Status Tracking
 
 ```python
 # url_submitter.py → poll_operation()
-# 주기적으로 Operation 상태를 조회하여 완료 여부 확인
+# Periodically check the Operation status for completion
 
 from google.api_core import operations_v1
 
 ops_client = operations_v1.OperationsClient(transport.grpc_channel)
 op = ops_client.get_operation(operation_name)
 
-# op.done == True 이면 처리 완료
-# metadata에서 최종 상태 확인
+# op.done == True means processing is complete
+# Check metadata for the final state
 ```
 
-**Operation 상태값:**
+**Operation States:**
 
-| 상태 | 의미 |
-|-----|------|
-| `RUNNING` | Google이 URL을 검토 중 |
-| `SUCCEEDED` | 검토 완료, 블록리스트에 반영됨 |
-| `FAILED` | 검토 실패 (URL 접근 불가 등) |
-| `CANCELLED` | 작업이 취소됨 |
-| `CLOSED` | 처리 종료 (중복 제출 등) |
+| State | Meaning |
+|-------|---------|
+| `RUNNING` | Google is reviewing the URL |
+| `SUCCEEDED` | Review complete, added to blocklist |
+| `FAILED` | Review failed (e.g., URL unreachable) |
+| `CANCELLED` | Operation was cancelled |
+| `CLOSED` | Processing finished (e.g., duplicate submission) |
 
-#### 9.6 Operation 라이프사이클
+#### 9.6 Operation Lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant U as 사용자 (CLI)
+    participant U as User (CLI)
     participant S as url_submitter.py
     participant G as Google SubmitUri API
-    participant R as Google 검토 시스템
+    participant R as Google Review System
 
     U->>S: submit_uri(project, url, ...)
     activate S
 
-    Note over S: 요청 객체 구성<br/>(Submission, ThreatInfo, ThreatDiscovery)
+    Note over S: Build request objects<br/>(Submission, ThreatInfo, ThreatDiscovery)
     S->>G: client.submit_uri(request)
     G-->>S: Operation {name, RUNNING}
-    S-->>U: operation_name 반환
+    S-->>U: Return operation_name
 
     deactivate S
 
-    Note over G,R: Google 내부 검토 (비동기)<br/>URL 접근, 콘텐츠 분석, 판정
+    Note over G,R: Google internal review (async)<br/>URL access, content analysis, verdict
 
-    opt --wait 옵션 사용 시
+    opt --wait flag specified
         U->>S: poll_operation(operation_name)
         activate S
 
-        loop 주기적 폴링 (기본 10초)
+        loop Periodic polling (default 10s)
             S->>G: get_operation(name)
             G-->>S: {done: false, state: RUNNING}
-            Note over S: 대기...
+            Note over S: Waiting...
         end
 
         S->>G: get_operation(name)
         G-->>S: {done: true, state: SUCCEEDED}
-        S-->>U: 최종 상태 반환
+        S-->>U: Return final state
 
         deactivate S
     end
 ```
 
-#### 9.7 Google의 Best Practice
+#### 9.7 Google's Best Practices for Submissions
 
-| 권장 사항 | 설명 |
-|----------|------|
-| **신뢰도(confidence) 정확히 기입** | HIGH는 수동 검증 완료 시에만 사용. 잘못된 HIGH 신뢰도는 오탐 유발. |
-| **근거(justification) 상세 기입** | labels + comments를 함께 작성하면 Google 검토 속도 향상. |
-| **중복 제출 피하기** | 동일 URL을 반복 제출하면 CLOSED 상태로 처리될 수 있음. |
-| **region_codes 활용** | 지역 특화 피싱(예: 한국 대상 피싱)은 지역 코드를 명시하면 분류 정확도 향상. |
-| **platform 명시** | 모바일 전용 피싱 등 플랫폼 특화 위협은 반드시 플랫폼 지정. |
-| **비동기 처리 감안** | LRO는 즉시 완료되지 않음. 사용자 UX에서 "제출됨" 상태를 별도 표시. |
-| **allowlist 확인** | API 호출 전 프로젝트가 allowlist에 등록되었는지 확인 (미등록 시 403 에러). |
-
----
-
-## 10. 파일 구조 & 함수 참조
-
-### `url_canonicalizer.py` — URL 정규화 & 해싱
-
-| 함수 | 설명 |
-|------|------|
-| `canonicalize(url)` | Google 스펙에 따른 URL 정규화 (7단계) |
-| `_remove_tab_cr_lf(url)` | 탭, CR, LF 제거 |
-| `_unescape_until_stable(url)` | 반복 percent-decode |
-| `_percent_escape(url)` | 특수 문자 percent-encode (%XX) |
-| `_normalize_host(host)` | 호스트 정규화 (점 처리, IDN→Punycode, IP 정규화, 소문자) |
-| `_parse_ip_octal_hex(host)` | 8진수/16진수/축약 IP → dotted-decimal |
-| `_normalize_path(path)` | 경로 정규화 (/../, /./, // 처리) |
-| `_generate_host_suffixes(host)` | 호스트 접미사 생성 (최대 5개, IP 제외) |
-| `_generate_path_prefixes(path, query)` | 경로 접두사 생성 (최대 6개) |
-| `generate_url_expressions(url)` | suffix/prefix 조합 생성 (최대 30개) |
-| `compute_url_hashes(url)` | 모든 expression의 SHA-256 해시 리스트 |
-
-### `threat_hash_store.py` — SQLite DB 관리
-
-| 함수 | 설명 |
-|------|------|
-| `init_db()` | 테이블 생성 (hash_prefixes, metadata, url_check_cache) |
-| `get_version_token(threat_type)` | 저장된 version_token 반환 |
-| `save_metadata(threat_type, token, next_diff)` | 메타데이터 저장/갱신 |
-| `get_next_diff_time(threat_type)` | 다음 동기화 권장 시각 조회 |
-| `reset_prefixes(threat_type, prefixes)` | RESET: 전체 교체 |
-| `apply_diff(threat_type, additions, removals)` | DIFF: 증분 적용 |
-| `lookup_prefix(hash_prefix)` | 해시 프리픽스 로컬 매칭 |
-| `get_prefix_count(threat_type)` | 저장된 프리픽스 수 |
-| `get_cached_result(url)` | 캐시 조회 (만료 자동 삭제) |
-| `save_cached_result(url, is_safe, threats, expire)` | 결과 캐시 저장 |
-| `clear_cache()` | 전체 캐시 삭제 |
-| `purge_expired_cache()` | 만료 캐시만 삭제 |
-| `get_cache_count()` | 캐시 엔트리 수 |
-
-### `threat_list_syncer.py` — 위협 리스트 동기화
-
-| 함수 | 설명 |
-|------|------|
-| `sync_threat_list(threat_type, client)` | 단일 위협 유형 동기화 |
-| `sync_all(client)` | 모든 위협 유형 동기화 |
-| `should_sync(threat_type)` | 동기화 필요 여부 확인 |
-| `_parse_raw_hashes(additions)` | API 응답 → 프리픽스 리스트 파싱 |
-| `_parse_removal_indices(removals)` | API 응답 → 삭제 인덱스 파싱 |
-
-### `url_threat_checker.py` — URL 위협 검사
-
-| 함수 | 설명 |
-|------|------|
-| `check_url(url, client, use_cache, verbose)` | 4단계 URL 검사 (캐시→로컬→API→캐시 저장) |
-
-### `url_submitter.py` — 의심 URL 신고
-
-| 함수 | 설명 |
-|------|------|
-| `submit_uri(project_id, uri, ...)` | 의심 URL을 Google에 제출 (LRO 반환) |
-| `poll_operation(operation_name, ...)` | LRO 상태를 주기적으로 폴링하여 완료 대기 |
-| `_get_state_from_metadata(metadata_any)` | Operation metadata에서 상태 문자열 추출 |
-
-**`submit_uri()` 파라미터:**
-
-| 파라미터 | 타입 | 필수 | 기본값 | 설명 |
-|---------|------|------|-------|------|
-| `project_id` | `str` | ✅ | — | GCP 프로젝트 ID |
-| `uri` | `str` | ✅ | — | 제출할 의심 URL |
-| `threat_type` | `str` | — | `"SOCIAL_ENGINEERING"` | 위협 유형 |
-| `confidence` | `str` | — | `"MEDIUM"` | 신뢰도 레벨 |
-| `justification_labels` | `list[str]` | — | `None` | 신고 근거 라벨 |
-| `justification_comments` | `list[str]` | — | `None` | 자유 형식 설명 |
-| `platform` | `str` | — | `None` | 발견 플랫폼 |
-| `region_codes` | `list[str]` | — | `None` | ISO 3166-1 alpha-2 지역 코드 |
-| `verbose` | `bool` | — | `False` | 상세 출력 |
-
-### `webrisk_cli.py` — CLI 인터페이스
-
-| 명령어 | 함수 | 설명 |
-|--------|------|------|
-| `sync [-f]` | `cmd_sync()` | 위협 리스트 동기화 (`-f`: 강제 전체) |
-| `check [-v] URL` | `cmd_check()` | URL 위협 검사 (`-v`: 상세 출력) |
-| `status` | `cmd_status()` | 로컬 DB 상태 확인 |
-| `cache-clear` | `cmd_cache_clear()` | URL 검사 캐시 전체 삭제 |
-| `submit URL --project ID [옵션]` | `cmd_submit()` | 의심 URL 신고 |
+| Recommendation | Description |
+|----------------|-------------|
+| **Set confidence accurately** | Use HIGH only when manually verified. Incorrect HIGH confidence causes false positives. |
+| **Provide detailed justification** | Include both labels + comments for faster Google review. |
+| **Avoid duplicate submissions** | Repeated submissions of the same URL may result in CLOSED status. |
+| **Use region_codes** | Region-specific phishing (e.g., targeting Korea) benefits from explicit region codes. |
+| **Specify platform** | Mobile-only phishing and platform-specific threats should include platform info. |
+| **Account for async processing** | LRO does not complete immediately. Show "submitted" status in UX. |
+| **Verify allowlist registration** | Confirm your project is on the allowlist before calling the API (403 error if not). |
 
 ---
 
-## 11. CLI 사용 예시
+## 10. File Structure & Function Reference
 
-### 초기 동기화
+### `url_canonicalizer.py` — URL Canonicalization & Hashing
+
+| Function | Description |
+|----------|-------------|
+| `canonicalize(url)` | 7-step URL canonicalization per Google spec |
+| `_remove_tab_cr_lf(url)` | Remove tab, CR, LF characters |
+| `_unescape_until_stable(url)` | Iterative percent-decode until stable |
+| `_percent_escape(url)` | Percent-encode special characters (%XX) |
+| `_normalize_host(host)` | Host normalization (dot handling, IDN→Punycode, IP normalization, lowercase) |
+| `_parse_ip_octal_hex(host)` | Octal/hex/shorthand IP → dotted-decimal |
+| `_normalize_path(path)` | Path normalization (/../, /./, // resolution) |
+| `_generate_host_suffixes(host)` | Generate host suffixes (up to 5, excluding IPs) |
+| `_generate_path_prefixes(path, query)` | Generate path prefixes (up to 6) |
+| `generate_url_expressions(url)` | Generate suffix/prefix combinations (up to 30) |
+| `compute_url_hashes(url)` | SHA-256 hash list for all expressions |
+
+### `threat_hash_store.py` — SQLite DB Management
+
+| Function | Description |
+|----------|-------------|
+| `init_db()` | Create tables (hash_prefixes, metadata, url_check_cache) |
+| `get_version_token(threat_type)` | Return stored version_token |
+| `save_metadata(threat_type, token, next_diff)` | Save/update metadata |
+| `get_next_diff_time(threat_type)` | Query recommended next sync time |
+| `reset_prefixes(threat_type, prefixes)` | RESET: full replacement |
+| `apply_diff(threat_type, additions, removals)` | DIFF: incremental update |
+| `lookup_prefix(hash_prefix)` | Local hash prefix matching |
+| `get_prefix_count(threat_type)` | Count of stored prefixes |
+| `get_cached_result(url)` | Cache lookup (auto-deletes expired entries) |
+| `save_cached_result(url, is_safe, threats, expire)` | Save result to cache |
+| `clear_cache()` | Clear entire cache |
+| `purge_expired_cache()` | Delete only expired cache entries |
+| `get_cache_count()` | Count of cache entries |
+
+### `threat_list_syncer.py` — Threat List Synchronization
+
+| Function | Description |
+|----------|-------------|
+| `sync_threat_list(threat_type, client)` | Sync a single threat type |
+| `sync_all(client)` | Sync all threat types |
+| `should_sync(threat_type)` | Check if sync is needed |
+| `_parse_raw_hashes(additions)` | Parse API response → prefix list |
+| `_parse_removal_indices(removals)` | Parse API response → removal indices |
+
+### `url_threat_checker.py` — URL Threat Checking
+
+| Function | Description |
+|----------|-------------|
+| `check_url(url, client, use_cache, verbose)` | 4-step URL check (cache → local → API → cache store) |
+
+### `url_submitter.py` — Suspicious URL Submission
+
+| Function | Description |
+|----------|-------------|
+| `submit_uri(project_id, uri, ...)` | Submit suspicious URL to Google (returns LRO) |
+| `poll_operation(operation_name, ...)` | Periodically poll LRO status until completion |
+| `_get_state_from_metadata(metadata_any)` | Extract state string from Operation metadata |
+
+**`submit_uri()` Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `project_id` | `str` | ✅ | — | GCP project ID |
+| `uri` | `str` | ✅ | — | Suspicious URL to submit |
+| `threat_type` | `str` | — | `"SOCIAL_ENGINEERING"` | Threat type |
+| `confidence` | `str` | — | `"MEDIUM"` | Confidence level |
+| `justification_labels` | `list[str]` | — | `None` | Justification labels |
+| `justification_comments` | `list[str]` | — | `None` | Free-form description |
+| `platform` | `str` | — | `None` | Discovery platform |
+| `region_codes` | `list[str]` | — | `None` | ISO 3166-1 alpha-2 region codes |
+| `verbose` | `bool` | — | `False` | Verbose output |
+
+### `webrisk_cli.py` — CLI Interface
+
+| Command | Function | Description |
+|---------|----------|-------------|
+| `sync [-f]` | `cmd_sync()` | Sync threat lists (`-f`: force full reset) |
+| `check [-v] URL` | `cmd_check()` | Check URL for threats (`-v`: verbose output) |
+| `status` | `cmd_status()` | Show local DB status |
+| `cache-clear` | `cmd_cache_clear()` | Clear all URL check cache |
+| `submit URL --project ID [options]` | `cmd_submit()` | Submit suspicious URL |
+
+---
+
+## 11. CLI Usage Examples
+
+### Initial Sync
 
 ```bash
 $ python webrisk_cli.py sync -f
@@ -1145,7 +1115,7 @@ Starting full forced sync...
 Sync complete.
 ```
 
-### URL 검사 (Verbose 모드)
+### URL Check (Verbose Mode)
 
 ```bash
 $ python webrisk_cli.py check -v "http://example.com/path?q=test"
@@ -1163,7 +1133,7 @@ Checking: http://example.com/path?q=test
   Safe - no threats detected.
 ```
 
-### URL 검사 (캐시 HIT)
+### URL Check (Cache HIT)
 
 ```bash
 $ python webrisk_cli.py check -v "http://example.com/path?q=test"
@@ -1177,7 +1147,7 @@ Checking: http://example.com/path?q=test
   Safe - no threats detected.
 ```
 
-### 위협 감지 시
+### Threat Detected
 
 ```bash
 $ python webrisk_cli.py check -v "http://malicious-site.example"
@@ -1198,7 +1168,7 @@ Checking: http://malicious-site.example
     - MALWARE (expires: 2026-03-07T00:00:00+00:00)
 ```
 
-### DB 상태 확인
+### DB Status
 
 ```bash
 $ python webrisk_cli.py status
@@ -1223,7 +1193,7 @@ $ python webrisk_cli.py status
   URL check cache  : 42 entries
 ```
 
-### 의심 URL 신고 (기본)
+### Submit Suspicious URL (Basic)
 
 ```bash
 $ python webrisk_cli.py submit "http://phishing.example/login" \
@@ -1239,7 +1209,7 @@ Submitting: http://phishing.example/login
   Operation: projects/my-project-123/operations/abc123def456
 ```
 
-### 의심 URL 신고 (전체 옵션 + 대기)
+### Submit Suspicious URL (Full Options + Wait)
 
 ```bash
 $ python webrisk_cli.py submit "http://malware-drop.example/payload.exe" \
@@ -1294,62 +1264,62 @@ Submitting: http://malware-drop.example/payload.exe
 
 ## 12. Best Practices
 
-### 동기화 관련
+### Synchronization
 
-| Practice | 설명 |
-|----------|------|
-| **`recommended_next_diff` 준수** | 동기화(`computeDiff`) 자체는 무료이지만, 권장 시각 전에 재요청하면 변경 사항 없이 대역폭만 낭비됩니다. |
-| **version_token 보존** | 토큰이 유실되면 전체 RESET이 발생해 대역폭을 낭비합니다. |
-| **주기적 동기화 스케줄링** | cron 또는 스케줄러로 `sync`를 자동 실행하세요. |
-| **DIFF 실패 시 RESET 대비** | 토큰이 만료되면 서버가 자동으로 RESET을 반환합니다. |
+| Practice | Description |
+|----------|-------------|
+| **Respect `recommended_next_diff`** | Although `computeDiff` is free, requesting before the recommended time wastes bandwidth with no new changes. |
+| **Preserve version_token** | Losing the token triggers a full RESET, wasting bandwidth. |
+| **Schedule periodic syncs** | Use cron or a scheduler to run `sync` automatically. |
+| **Prepare for RESET on DIFF failure** | If the token expires, the server automatically returns a RESET response. |
 
-### 검사 관련
+### Threat Checking
 
-| Practice | 설명 |
-|----------|------|
-| **캐시 활용** | 동일 URL 반복 검사 시 `use_cache=True` (기본값)로 SearchHashes 호출 절감 ($50/1K회). |
-| **동기화 선행** | 검사 전 로컬 DB가 비어있으면 자동으로 `sync_all()`이 호출됩니다. |
-| **SearchHashes 최소화** | 대부분의 URL은 로컬 매칭에서 SAFE로 판정됩니다. 유료인 SearchHashes 호출은 드뭅니다. |
+| Practice | Description |
+|----------|-------------|
+| **Leverage caching** | For repeated URL checks, `use_cache=True` (default) reduces costly SearchHashes calls. |
+| **Sync before checking** | If the local DB is empty when checking, `sync_all()` is called automatically. |
+| **Minimize SearchHashes calls** | Most URLs are resolved as SAFE at the local matching stage. Paid SearchHashes calls are rare. |
 
-### URL 정규화 관련
+### URL Canonicalization
 
-| Practice | 설명 |
-|----------|------|
-| **정규화 순서 준수** | 탭/CR 제거 → 프래그먼트 제거 → unescape → 호스트/경로 정규화 → percent-escape |
-| **IP 주소 처리** | 8진수, 16진수, 축약형 IP를 모두 dotted-decimal로 변환. |
-| **IDN 도메인** | 국제화 도메인은 Punycode로 변환하여 일관된 매칭 보장. |
-| **suffix/prefix에서 IP 제외** | IP 주소는 호스트 접미사를 생성하지 않습니다 (Google 스펙). |
+| Practice | Description |
+|----------|-------------|
+| **Follow canonicalization order** | Tab/CR removal → fragment removal → unescape → host/path normalization → percent-escape |
+| **Handle IP addresses** | Convert all octal, hex, and shorthand IPs to dotted-decimal. |
+| **IDN domains** | Convert internationalized domain names to Punycode for consistent matching. |
+| **Exclude IPs from suffix generation** | IP addresses do not produce host suffixes (per Google spec). |
 
-### 운영 관련
+### Operations
 
-| Practice | 설명 |
-|----------|------|
-| **DB 파일 백업** | `webrisk_local.db`를 주기적으로 백업하세요 (version_token 보존). |
-| **`.gitignore`에 DB 추가** | `webrisk_local.db`는 Git에 포함하지 마세요. |
-| **캐시 정리** | `cache-clear` 또는 `purge_expired_cache()`로 만료 캐시를 정리하세요. |
-| **에러 핸들링** | 네트워크 오류 시 SearchHashes 호출이 실패해도 안전하게 처리됩니다. |
+| Practice | Description |
+|----------|-------------|
+| **Back up DB file** | Periodically back up `webrisk_local.db` (preserves version_token). |
+| **Add DB to `.gitignore`** | Do not commit `webrisk_local.db` to Git. |
+| **Prune cache** | Use `cache-clear` or `purge_expired_cache()` to clean up expired entries. |
+| **Error handling** | SearchHashes failures due to network errors are handled gracefully. |
 
-### Submit URI 관련
+### Submit URI
 
-| Practice | 설명 |
-|----------|------|
-| **allowlist 등록 확인** | API 호출 전 GCP 프로젝트가 SubmitUri allowlist에 등록되었는지 확인. 미등록 시 `403 PERMISSION_DENIED`. |
-| **신뢰도(confidence) 정확히 기입** | `HIGH`는 수동 검증이 완료된 경우에만 사용. 잘못된 신뢰도는 오탐(false positive)을 유발. |
-| **근거(justification) 상세 기입** | `labels` + `comments`를 함께 작성하면 Google의 검토 속도가 향상됩니다. |
-| **중복 제출 피하기** | 동일 URL을 반복 제출하면 `CLOSED` 상태로 처리될 수 있음. |
-| **region_codes 활용** | 지역 특화 피싱(예: 한국 대상)은 지역 코드를 명시하면 분류 정확도 향상. |
-| **platform 명시** | 모바일 전용 피싱 등 플랫폼 특화 위협은 반드시 플랫폼을 지정. |
-| **LRO 비동기 처리** | `submit_uri()`는 즉시 완료되지 않음. UX에서 "제출 완료" 상태를 별도 표시. |
-| **타임아웃 설정** | `--wait` 사용 시 적절한 `--timeout` 설정. Google 검토 시간은 수 분~수 시간. |
+| Practice | Description |
+|----------|-------------|
+| **Verify allowlist registration** | Confirm your GCP project is on the SubmitUri allowlist before calling. Without it, you get `403 PERMISSION_DENIED`. |
+| **Set confidence accurately** | Use `HIGH` only after manual verification. Incorrect confidence causes false positives. |
+| **Provide detailed justification** | Include both `labels` + `comments` for faster Google review. |
+| **Avoid duplicate submissions** | Repeated submissions of the same URL may result in `CLOSED` status. |
+| **Use region_codes** | Region-specific phishing (e.g., targeting Korea) benefits from explicit region codes. |
+| **Specify platform** | Mobile-only phishing and platform-specific threats should include platform info. |
+| **Account for async LRO** | `submit_uri()` does not complete immediately. Show a "submitted" status in your UX. |
+| **Set appropriate timeout** | When using `--wait`, set a reasonable `--timeout`. Google review can take minutes to hours. |
 
 ---
 
-## 참조
+## References
 
-- [Google Web Risk API 문서](https://cloud.google.com/web-risk/docs)
-- [Update API 가이드](https://cloud.google.com/web-risk/docs/update-api)
-- [Submit URI 가이드](https://cloud.google.com/web-risk/docs/submit-uri)
-- [URL 정규화 & 해싱 스펙](https://cloud.google.com/web-risk/docs/urls-hashing)
+- [Google Web Risk API Documentation](https://cloud.google.com/web-risk/docs)
+- [Update API Guide](https://cloud.google.com/web-risk/docs/update-api)
+- [Submit URI Guide](https://cloud.google.com/web-risk/docs/submit-uri)
+- [URL Canonicalization & Hashing Spec](https://cloud.google.com/web-risk/docs/urls-hashing)
 - [ComputeThreatListDiff RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#computethreatlistdiffrequest)
 - [SearchHashes RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#searchhashesrequest)
 - [SubmitUri RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#submituriRequest)

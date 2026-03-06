@@ -173,8 +173,9 @@ Output:
 | `url_canonicalizer.py`      | URL canonicalization and SHA-256 hashing                  |
 | `url_submitter.py`          | Submit suspicious URLs via `SubmitUri` API + LRO polling  |
 | `threat_hash_store.py`      | SQLite storage for hash prefixes and metadata             |
+| `test_canon.py`             | Unit tests for URL canonicalization                       |
 | `WORKFLOW_GUIDE.md`         | Detailed workflow documentation with Mermaid diagrams     |
-| `webrisk_local.db`          | Auto-generated local SQLite database (gitignore this)     |
+| `webrisk_local.db`          | Auto-generated local SQLite database (gitignored)         |
 
 ## References
 
@@ -185,4 +186,3 @@ Output:
 - [ComputeThreatListDiff RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#computethreatlistdiffrequest)
 - [SearchHashes RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#searchhashesrequest)
 - [SubmitUri RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#submituriRequest)
-# web-risk-cli

@@ -141,7 +141,7 @@ def should_sync(threat_type: webrisk_v1.ThreatType) -> bool:
     if next_diff is None:
         return True
     now = datetime.now(timezone.utc)
-    # next_diff에 tzinfo가 없으면 UTC로 간주
+    # If next_diff has no tzinfo, treat it as UTC
     if next_diff.tzinfo is None:
         next_diff = next_diff.replace(tzinfo=timezone.utc)
     return now >= next_diff

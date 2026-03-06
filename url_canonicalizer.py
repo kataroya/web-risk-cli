@@ -273,6 +273,6 @@ def generate_url_expressions(url: str) -> list[str]:
 
 
 def compute_url_hashes(url: str) -> list[bytes]:
-    """URL에서 생성되는 모든 expression의 SHA-256 full hash(32바이트) 목록을 반환한다."""
+    """Return a list of SHA-256 full hashes (32 bytes each) for all expressions generated from the URL."""
     expressions = generate_url_expressions(url)
     return [hashlib.sha256(expr.encode("utf-8")).digest() for expr in expressions]

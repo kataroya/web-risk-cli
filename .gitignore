@@ -1,8 +1,24 @@
-# Python Environment
+# Python
 .venv/
-# Tests
+__pycache__/
+*.pyc
+
+# Agent config (not part of public project)
 AGENT_CONF.md
-# DB files
+
+# Local-only documentation
+PRICING_GUIDE.md
+
+# SQLite database files
 webrisk_local.db
 webrisk_local.db-shm
 webrisk_local.db-wal
+
+# Node / Mermaid CLI (used only for doc generation)
+node_modules/
+package.json
+package-lock.json
+
+# Generated artifacts
+mermaid_images/
+*.docx
