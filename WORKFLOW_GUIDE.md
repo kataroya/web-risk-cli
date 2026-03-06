@@ -37,18 +37,18 @@
 
 ```mermaid
 graph TB
-    subgraph APP["Web Application / OEM Product"]
+    subgraph APP["Application"]
         URL_INPUT["URL Input"]
         SUSPICIOUS["Suspicious URL Report"]
     end
 
-    subgraph CLIENT["Web Risk API Client"]
+    subgraph CLIENT["Web Risk Client"]
         CHECKER["URL Threat Checker<br/>url_threat_checker.py"]
         CANON["URL Canonicalizer<br/>url_canonicalizer.py"]
         SYNCER["Threat List Syncer<br/>threat_list_syncer.py"]
         SUBMITTER["URL Submitter<br/>url_submitter.py"]
-        CACHE[("URL Cache<br/>(SQLite)")]
-        HASHDB[("Hash Prefix DB<br/>(SQLite)")]
+        CACHE[("URL Cache")]
+        HASHDB[("Hash Prefix DB")]
     end
 
     subgraph GOOGLE["Google Cloud"]
@@ -275,24 +275,24 @@ A 4-step workflow to check whether a URL is listed in any threat list.
 flowchart TD
     URL["URL Input<br/>'http://example.com/path?q=1'"] --> S0
 
-    subgraph S0["Step 0: Cache Check"]
+    subgraph S0["Step 0: Cache"]
         S0A["get_cached_result()"]
     end
 
     S0 -->|"HIT (not expired)"| RETURN_CACHE["Return immediately<br/>No API call"]
     S0 -->|"MISS"| S1
 
-    subgraph S1["Step 1: Local Prefix Matching (no network)"]
-        S1A["① canonicalize(url)"] --> S1B["② compute_url_hashes(url)<br/>→ full hash list (held in memory)"]
-        S1B --> S1C["③ lookup_prefix(full_hash)<br/>→ first N bytes of full hash vs DB prefix"]
+    subgraph S1["Step 1: Local Matching"]
+        S1A["① canonicalize(url)"] --> S1B["② compute_url_hashes(url)"]
+        S1B --> S1C["③ lookup_prefix(full_hash)"]
     end
 
     S1 -->|"No match"| SAFE["SAFE"]
     S1 -->|"Match found"| S2
 
-    subgraph S2["Step 2: SearchHashes API Verification"]
-        S2A["Send matched prefix (4 bytes)<br/>to Google"] --> S2B["Google returns<br/>full hash candidate list"]
-        S2B --> S2C["Compare server full hash vs<br/>in-memory full hash<br/>threat.hash in url_hashes"]
+    subgraph S2["Step 2: API Verification"]
+        S2A["Send prefix to Google"] --> S2B["Google returns<br/>full hash candidates"]
+        S2B --> S2C["Compare full hashes"]
     end
 
     S2 -->|"No match"| SAFE
@@ -301,8 +301,8 @@ flowchart TD
     SAFE --> S3
     THREAT --> S3
 
-    subgraph S3["Step 3: Cache Result"]
-        S3A["save_cached_result()<br/>Threat: until expire_time / Safe: 30min TTL"]
+    subgraph S3["Step 3: Cache"]
+        S3A["save_cached_result()"]
     end
 
     style URL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
