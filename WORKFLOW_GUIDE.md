@@ -43,10 +43,10 @@ graph TB
     end
 
     subgraph CLIENT["Web Risk API Client"]
-        CHECKER["URL Threat Checker<br/><i>url_threat_checker.py</i>"]
-        CANON["URL Canonicalizer<br/><i>url_canonicalizer.py</i>"]
-        SYNCER["Threat List Syncer<br/><i>threat_list_syncer.py</i>"]
-        SUBMITTER["URL Submitter<br/><i>url_submitter.py</i>"]
+        CHECKER["URL Threat Checker<br/>url_threat_checker.py"]
+        CANON["URL Canonicalizer<br/>url_canonicalizer.py"]
+        SYNCER["Threat List Syncer<br/>threat_list_syncer.py"]
+        SUBMITTER["URL Submitter<br/>url_submitter.py"]
         CACHE[("URL Cache<br/>(SQLite)")]
         HASHDB[("Hash Prefix DB<br/>(SQLite)")]
     end
@@ -136,14 +136,14 @@ flowchart TD
     C --> F["sync_threat_list(threat_type)"]
     D --> F
     E --> F
-    F --> G["1. Load version_token<br/><code>get_version_token()</code>"]
-    G --> H["2. Call API<br/><code>compute_threat_list_diff()</code>"]
+    F --> G["1. Load version_token<br/>get_version_token()"]
+    G --> H["2. Call API<br/>compute_threat_list_diff()"]
     H --> I{"response_type?"}
-    I -->|RESET| J["3a. Parse full snapshot<br/><code>_parse_raw_hashes()</code>"]
-    I -->|DIFF| K["3b. Parse incremental diff<br/><code>_parse_raw_hashes()</code><br/><code>_parse_removal_indices()</code>"]
-    J --> L["4a. Replace entire DB<br/><code>reset_prefixes()</code>"]
-    K --> M["4b. Apply incremental diff<br/><code>apply_diff()</code>"]
-    L --> N["5. Save metadata<br/><code>save_metadata()</code>"]
+    I -->|RESET| J["3a. Parse full snapshot<br/>_parse_raw_hashes()"]
+    I -->|DIFF| K["3b. Parse incremental diff<br/>_parse_raw_hashes()<br/>_parse_removal_indices()"]
+    J --> L["4a. Replace entire DB<br/>reset_prefixes()"]
+    K --> M["4b. Apply incremental diff<br/>apply_diff()"]
+    L --> N["5. Save metadata<br/>save_metadata()"]
     M --> N
 
     style I fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
@@ -270,7 +270,7 @@ flowchart TD
 
     subgraph S2["Step 2: SearchHashes API Verification"]
         S2A["Send matched prefix (4 bytes)<br/>to Google"] --> S2B["Google returns<br/>full hash candidate list"]
-        S2B --> S2C["Compare server full hash vs<br/>in-memory full hash<br/><code>threat.hash in url_hashes</code>"]
+        S2B --> S2C["Compare server full hash vs<br/>in-memory full hash<br/>threat.hash in url_hashes"]
     end
 
     S2 -->|"No match"| SAFE
@@ -363,13 +363,13 @@ for threat in response.threats:
 
 ```mermaid
 flowchart TD
-    URL["URL: 'http://evil.com/malware'"] --> CALC["compute_url_hashes()<br/><i>url_threat_checker.py L47-49</i>"]
+    URL["URL: 'http://evil.com/malware'"] --> CALC["compute_url_hashes()<br/>url_threat_checker.py L47-49"]
     CALC --> MEM_FULL["In-memory full hashes<br/>[ab12cd34ef56...32bytes, ...]"]
-    MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/><i>url_threat_checker.py L53-56</i>"]
+    MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/>url_threat_checker.py L53-56"]
     LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>ab12cd34 == ab12cd34"]
-    CMP1 --> API["search_hashes(prefix=ab12cd34)<br/><i>url_threat_checker.py L72-80</i>"]
+    CMP1 --> API["search_hashes(prefix=ab12cd34)<br/>url_threat_checker.py L72-80"]
     API --> SERVER["Google returns full hash candidates<br/>ab12cd34ef56...32bytes (MALWARE)<br/>ab12cd349876...32bytes (PHISHING)<br/>ab12cd3412345...32bytes (MALWARE)"]
-    SERVER --> CMP2["threat.hash in url_hashes<br/><i>url_threat_checker.py L86-87</i>"]
+    SERVER --> CMP2["threat.hash in url_hashes<br/>url_threat_checker.py L86-87"]
     CMP2 --> RESULT["Server full hash == in-memory full hash<br/>→ Threat confirmed!"]
 
     DB[("Local DB<br/>prefix only<br/>ab12cd34 (4bytes)")]
