@@ -23,32 +23,36 @@
 
 ## 1. 아키텍처 개요
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     웹 애플리케이션 / OEM 제품                  │
-│                                                             │
-│   URL 입력  ──────────────────────────────┐                  │
-└────────────────────────────────────────────┼─────────────────┘
-                                             │
-                                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Web Risk Update API Client                │
-│                                                             │
-│  ┌───────────┐    ┌──────────────────┐    ┌──────────────┐  │
-│  │ URL Cache  │◄──│ URL Threat       │───►│ SearchHashes │  │
-│  │ (SQLite)   │   │ Checker          │    │ API (Google) │  │
-│  └───────────┘    └──────┬───────────┘    └──────────────┘  │
-│                          │                                   │
-│  ┌───────────┐    ┌──────▼───────────┐                       │
-│  │ Hash      │◄──│ URL              │                       │
-│  │ Prefix DB │   │ Canonicalizer    │                       │
-│  │ (SQLite)  │   └──────────────────┘                       │
-│  └─────┬─────┘                                               │
-│        │                                                     │
-│  ┌─────▼──────────────────┐                                  │
-│  │ Threat List Syncer     │◄──── ComputeThreatListDiff API  │
-│  └────────────────────────┘      (Google)                    │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph APP["웹 애플리케이션 / OEM 제품"]
+        URL_INPUT["URL 입력"]
+    end
+
+    subgraph CLIENT["Web Risk Update API Client"]
+        CHECKER["URL Threat Checker<br/><i>url_threat_checker.py</i>"]
+        CANON["URL Canonicalizer<br/><i>url_canonicalizer.py</i>"]
+        SYNCER["Threat List Syncer<br/><i>threat_list_syncer.py</i>"]
+        CACHE[("URL Cache<br/>(SQLite)")]
+        HASHDB[("Hash Prefix DB<br/>(SQLite)")]
+    end
+
+    subgraph GOOGLE["Google Cloud"]
+        SEARCH_API["SearchHashes API"]
+        DIFF_API["ComputeThreatListDiff API"]
+    end
+
+    URL_INPUT --> CHECKER
+    CHECKER <--> CACHE
+    CHECKER --> CANON
+    CHECKER <--> SEARCH_API
+    CANON --> HASHDB
+    SYNCER <--> DIFF_API
+    SYNCER --> HASHDB
+
+    style APP fill:#e3f2fd,stroke:#1565c0
+    style CLIENT fill:#fff3e0,stroke:#e65100
+    style GOOGLE fill:#e8f5e9,stroke:#2e7d32
 ```
 
 ### 왜 Update API인가? (vs Lookup API)
@@ -95,35 +99,28 @@ pip install google-cloud-webrisk
 
 ### 전체 흐름
 
-```
-                   ┌──────────────────┐
-                   │ webrisk_cli.py   │
-                   │   cmd_sync()     │
-                   └────────┬─────────┘
-                            │
-                ┌───────────▼───────────┐
-                │ threat_list_syncer.py │
-                │   sync_all()         │
-                └───────────┬───────────┘
-                            │
-           ┌────────────────┼────────────────┐
-           ▼                ▼                ▼
-    ┌──────────┐     ┌──────────┐     ┌──────────┐
-    │ MALWARE  │     │ SOCIAL_  │     │ UNWANTED │
-    │          │     │ ENGINEER │     │ SOFTWARE │
-    └────┬─────┘     └────┬─────┘     └────┬─────┘
-         │                │                │
-         └────────────────┼────────────────┘
-                          ▼
-              sync_threat_list(threat_type)
-                          │
-            ┌─────────────▼──────────────┐
-            │ 1. version_token 로드       │  ← threat_hash_store.get_version_token()
-            │ 2. API 호출                 │  ← client.compute_threat_list_diff()
-            │ 3. 응답 파싱               │  ← _parse_raw_hashes(), _parse_removal_indices()
-            │ 4. 로컬 DB 반영             │  ← reset_prefixes() or apply_diff()
-            │ 5. 메타데이터 저장           │  ← save_metadata()
-            └────────────────────────────┘
+```mermaid
+flowchart TD
+    A["webrisk_cli.py<br/>cmd_sync()"] --> B["threat_list_syncer.py<br/>sync_all()"]
+    B --> C["MALWARE"]
+    B --> D["SOCIAL_ENGINEERING"]
+    B --> E["UNWANTED_SOFTWARE"]
+    C --> F["sync_threat_list(threat_type)"]
+    D --> F
+    E --> F
+    F --> G["1. version_token 로드<br/><code>get_version_token()</code>"]
+    G --> H["2. API 호출<br/><code>compute_threat_list_diff()</code>"]
+    H --> I{"response_type?"}
+    I -->|RESET| J["3a. 전체 스냅샷 파싱<br/><code>_parse_raw_hashes()</code>"]
+    I -->|DIFF| K["3b. 증분 파싱<br/><code>_parse_raw_hashes()</code><br/><code>_parse_removal_indices()</code>"]
+    J --> L["4a. DB 전체 교체<br/><code>reset_prefixes()</code>"]
+    K --> M["4b. DB 증분 반영<br/><code>apply_diff()</code>"]
+    L --> N["5. 메타데이터 저장<br/><code>save_metadata()</code>"]
+    M --> N
+
+    style I fill:#fff9c4,stroke:#f57f17
+    style J fill:#e8f5e9,stroke:#2e7d32
+    style K fill:#e3f2fd,stroke:#1565c0
 ```
 
 ### 단계별 상세
@@ -223,43 +220,44 @@ URL이 위협 목록에 포함되어 있는지 검사하는 4단계 워크플로
 
 ### 전체 흐름
 
-```
-  URL 입력: "http://example.com/path?q=1"
-       │
-  ┌────▼────────────────────────────────────┐
-  │ Step 0: 캐시 확인                        │
-  │   threat_hash_store.get_cached_result() │
-  │   → HIT: 즉시 반환 (API 호출 없음)       │
-  │   → MISS: 다음 단계로                    │
-  └────┬────────────────────────────────────┘
-       │
-  ┌────▼────────────────────────────────────┐
-  │ Step 1: 로컬 프리픽스 매칭 (네트워크 없음) │
-  │   ① url_canonicalizer.canonicalize()    │
-  │   ② url_canonicalizer.compute_url_hashes()  │
-  │   ③ 각 해시에 대해:                      │
-  │     threat_hash_store.lookup_prefix()   │
-  │   → 매칭 없음: SAFE (캐시 저장 후 반환)   │
-  │   → 매칭 있음: Step 2로                  │
-  └────┬────────────────────────────────────┘
-       │
-  ┌────▼────────────────────────────────────┐
-  │ Step 2: SearchHashes API 검증            │
-  │   매칭된 해시의 4바이트 프리픽스 전송       │
-  │   client.search_hashes(                 │
-  │     hash_prefix=prefix,                 │
-  │     threat_types=[MALWARE, ...]         │
-  │   )                                     │
-  │   → 서버의 full hash와 로컬 full hash 비교│
-  │   → 일치하면 THREAT, 아니면 SAFE          │
-  └────┬────────────────────────────────────┘
-       │
-  ┌────▼────────────────────────────────────┐
-  │ Step 3: 결과 캐싱                        │
-  │   threat_hash_store.save_cached_result()│
-  │   위협: API의 expire_time까지 캐시       │
-  │   안전: 30분 TTL 캐시                    │
-  └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    URL["URL 입력<br/>'http://example.com/path?q=1'"] --> S0
+
+    subgraph S0["Step 0: 캐시 확인"]
+        S0A["get_cached_result()"]
+    end
+
+    S0 -->|"HIT (미만료)"| RETURN_CACHE["즉시 반환<br/>API 호출 없음"]
+    S0 -->|"MISS"| S1
+
+    subgraph S1["Step 1: 로컬 프리픽스 매칭 (네트워크 없음)"]
+        S1A["① canonicalize(url)"] --> S1B["② compute_url_hashes(url)<br/>→ full hash 리스트 (메모리 보관)"]
+        S1B --> S1C["③ lookup_prefix(full_hash)<br/>→ full hash 앞 N바이트 vs DB 프리픽스"]
+    end
+
+    S1 -->|"매칭 없음"| SAFE["✅ SAFE"]
+    S1 -->|"매칭 있음"| S2
+
+    subgraph S2["Step 2: SearchHashes API 검증"]
+        S2A["매칭된 prefix (4바이트)를<br/>Google에 전송"] --> S2B["Google이 해당 prefix의<br/>full hash 후보 목록 반환"]
+        S2B --> S2C["서버 full hash vs<br/>메모리의 full hash 비교<br/><code>threat.hash in url_hashes</code>"]
+    end
+
+    S2 -->|"일치 없음"| SAFE
+    S2 -->|"일치 있음"| THREAT["🚨 THREAT 확정"]
+
+    SAFE --> S3
+    THREAT --> S3
+
+    subgraph S3["Step 3: 결과 캐싱"]
+        S3A["save_cached_result()<br/>위협: expire_time까지 / 안전: 30분 TTL"]
+    end
+
+    style RETURN_CACHE fill:#e8f5e9,stroke:#2e7d32
+    style SAFE fill:#e8f5e9,stroke:#2e7d32
+    style THREAT fill:#ffcdd2,stroke:#c62828
+    style S2 fill:#fff3e0,stroke:#e65100
 ```
 
 ### 단계별 상세
@@ -318,6 +316,105 @@ for threat in response.threats:
 
 > **프라이버시 포인트**: Google에 전송되는 것은 4바이트 해시 프리픽스뿐입니다.
 > 이 프리픽스로는 원본 URL을 역산할 수 없습니다.
+
+#### 4.3.1 Full Hash 비교 상세 — "로컬 full hash"는 어디서 오는가?
+
+> **핵심**: 로컬 DB에는 **full hash(32바이트)가 저장되지 않습니다.**
+> "로컬 full hash"는 검사 시점에 URL에서 **실시간으로 계산**합니다.
+
+**해시의 출처 비교:**
+
+| 해시 | 출처 | 크기 | DB 저장 여부 |
+|------|------|------|-------------|
+| 로컬 프리픽스 | `ComputeThreatListDiff` API 응답 → SQLite | 4~32바이트 | **저장됨** |
+| 로컬 full hash | URL에서 **실시간 계산** (`compute_url_hashes()`) | 32바이트 | 저장 안 됨 |
+| 서버 full hash | `SearchHashes` API 응답 (`threat.hash`) | 32바이트 | 저장 안 됨 |
+
+**동작 흐름 (코드 위치 포함):**
+
+```mermaid
+flowchart TD
+    URL["URL: 'http://evil.com/malware'"] --> CALC["compute_url_hashes()<br/><i>url_threat_checker.py L47-49</i>"]
+    CALC --> MEM_FULL["🧠 메모리에 full hash 보관<br/>[ab12cd34ef56...32bytes, ...]"]
+    MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/><i>url_threat_checker.py L53-56</i>"]
+    LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>ab12cd34 == ab12cd34 ✅"]
+    CMP1 --> API["search_hashes(prefix=ab12cd34)<br/><i>url_threat_checker.py L72-80</i>"]
+    API --> SERVER["🧠 Google 반환 full hash 후보<br/>ab12cd34ef56...32bytes (MALWARE)<br/>ab12cd349876...32bytes (PHISHING)<br/>ab12cd3412345...32bytes (MALWARE)"]
+    SERVER --> CMP2["threat.hash in url_hashes<br/><i>url_threat_checker.py L86-87</i>"]
+    CMP2 --> RESULT["🚨 서버 full hash == 메모리 full hash<br/>→ 위협 확정!"]
+
+    DB[("로컬 DB<br/>prefix만 저장<br/>ab12cd34 (4bytes)")]
+    DB -.-> LOCAL
+
+    style MEM_FULL fill:#e3f2fd,stroke:#1565c0
+    style SERVER fill:#fff3e0,stroke:#e65100
+    style RESULT fill:#ffcdd2,stroke:#c62828
+    style DB fill:#f3e5f5,stroke:#7b1fa2
+```
+
+**왜 이렇게 설계되었나?**
+
+1. **로컬 DB에는 프리픽스만 저장** — Google이 보내주는 것이 프리픽스(4바이트)이므로, 이것만으로는 정확한 판별이 불가능 (false positive 가능).
+2. **Full hash는 URL에서 계산** — 검사할 URL을 정규화 → suffix/prefix expression 생성 → SHA-256 해싱하면 32바이트 full hash가 만들어짐.
+3. **SearchHashes API가 full hash를 반환** — 4바이트 프리픽스에 매칭되는 **모든** 위협의 full hash 목록을 서버가 반환. **판정은 해주지 않음.**
+4. **최종 비교는 클라이언트가 수행** — 서버가 준 full hash 중 우리가 계산한 full hash와 일치하는 것이 있으면 위협 확정.
+
+이 구조 덕분에 Google에는 4바이트 프리픽스만 전송되고, 원본 URL은 노출되지 않습니다.
+
+#### 4.3.2 메모리 라이프사이클 — 해시 데이터는 언제 생기고 언제 사라지는가?
+
+`check_url()` 함수 실행 중 메모리에 존재하는 데이터와 그 생명주기:
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자
+    participant F as check_url() 함수
+    participant MEM as 메모리 (변수)
+    participant DB as 로컬 SQLite DB
+    participant G as Google API
+
+    U->>F: check_url("http://evil.com")
+    activate F
+
+    Note over F,MEM: Step 1 — full hash 계산
+    F->>MEM: url_hashes = compute_url_hashes(url)
+    Note over MEM: 🧠 full hash 리스트 보관<br/>[ab12cd34...32bytes, ...]
+
+    Note over F,DB: Step 1 — 로컬 프리픽스 매칭
+    F->>DB: lookup_prefix(full_hash)
+    DB-->>F: 매칭됨! (prefix ab12cd34)
+
+    Note over F,G: Step 2 — Google API 호출
+    F->>G: search_hashes(prefix=ab12cd34)
+    G-->>MEM: response.threats (full hash 후보 목록)
+    Note over MEM: 🧠 서버 응답도 메모리에 보관
+
+    Note over F,MEM: Step 2 — full hash 비교 (메모리 내)
+    F->>MEM: threat.hash in url_hashes?
+    MEM-->>F: 일치! → 위협 확정
+
+    Note over F,DB: Step 3 — 최종 판정 결과만 DB 저장
+    F->>DB: save_cached_result(결과)
+    Note over DB: 💾 safe/threat 판정만 캐시
+
+    F-->>U: {"safe": false, "threats": [...]}
+    deactivate F
+
+    Note over MEM: 🗑️ 함수 종료 → 변수 소멸<br/>url_hashes, response 모두 해제
+```
+
+**메모리에 보관되는 데이터 정리:**
+
+| 데이터 | 변수명 | 생성 시점 | 소멸 시점 | DB 저장 |
+|--------|--------|----------|----------|--------|
+| URL의 full hash 리스트 | `url_hashes` | Step 1 (URL에서 계산) | 함수 종료 | ❌ |
+| 로컬 매칭 결과 | `matched_hashes` | Step 1 (DB 매칭) | 함수 종료 | ❌ |
+| Google API 응답 (full hash 후보) | `response` | Step 2 (API 호출) | 함수 종료 | ❌ |
+| 최종 판정 결과 (safe/threat) | `result` | Step 2 (비교 완료) | **캐시에 저장** | ✅ |
+
+> **핵심**: 해시 값 자체는 어디에도 영구 저장되지 않습니다.
+> DB에 저장되는 것은 오직 **「이 URL이 안전한지/위협인지」라는 판정 결과**뿐입니다.
+> 다음에 같은 URL을 검사하면 캐시에서 판정 결과만 반환하고, 해시 계산은 하지 않습니다.
 
 #### 4.4 결과 캐싱 (Step 3)
 
@@ -604,16 +701,23 @@ CREATE TABLE url_check_cache (
 
 ### 캐시 흐름
 
-```
-check_url("http://example.com")
-  │
-  ├─ 캐시 HIT (미만료) → 즉시 반환 (API 호출 0회)
-  │
-  ├─ 캐시 MISS or 만료
-  │   ├─ 로컬 프리픽스 매칭 없음 → SAFE 캐시 저장 (30분 TTL)
-  │   └─ 로컬 매칭 있음 → SearchHashes → 결과 캐시 저장
-  │
-  └─ 다음 동일 URL 검사 시 → 캐시 HIT
+```mermaid
+flowchart TD
+    A["check_url('http://example.com')"] --> B{"캐시 조회"}
+    B -->|"HIT (미만료)"| C["즉시 반환<br/>API 호출 0회"]
+    B -->|"MISS or 만료"| D{"로컬 프리픽스 매칭"}
+    D -->|"매칭 없음"| E["SAFE 캐시 저장<br/>(30분 TTL)"]
+    D -->|"매칭 있음"| F["SearchHashes API"]
+    F --> G{"full hash 일치?"}
+    G -->|"일치"| H["THREAT 캐시 저장<br/>(expire_time)"]
+    G -->|"불일치"| E
+    E --> I["다음 동일 URL 검사 시"]
+    H --> I
+    I --> B
+
+    style C fill:#e8f5e9,stroke:#2e7d32
+    style E fill:#e8f5e9,stroke:#2e7d32
+    style H fill:#ffcdd2,stroke:#c62828
 ```
 
 ---
