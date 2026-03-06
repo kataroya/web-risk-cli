@@ -70,6 +70,17 @@ graph TB
     style APP fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
     style CLIENT fill:#fff3e0,stroke:#e65100,color:#1a1a1a
     style GOOGLE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style URL_INPUT fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SUSPICIOUS fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CHECKER fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CANON fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SYNCER fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SUBMITTER fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CACHE fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style HASHDB fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SEARCH_API fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style DIFF_API fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SUBMIT_API fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
 ```
 
 ### Why the Update API? (vs. Lookup API)
@@ -146,9 +157,20 @@ flowchart TD
     L --> N["5. Save metadata<br/>save_metadata()"]
     M --> N
 
+    style A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style B fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style C fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style D fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style E fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style F fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style G fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style H fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style I fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
     style J fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
     style K fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style L fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style M fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style N fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
 ```
 
 ### Step-by-Step Details
@@ -283,10 +305,22 @@ flowchart TD
         S3A["save_cached_result()<br/>Threat: until expire_time / Safe: 30min TTL"]
     end
 
+    style URL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style S0 fill:#f5f5f5,stroke:#616161,color:#1a1a1a
+    style S0A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style RETURN_CACHE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style S1 fill:#f5f5f5,stroke:#616161,color:#1a1a1a
+    style S1A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style S1B fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style S1C fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style SAFE fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
-    style THREAT fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
     style S2 fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style S2A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style S2B fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style S2C fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style THREAT fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
+    style S3 fill:#f5f5f5,stroke:#616161,color:#1a1a1a
+    style S3A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
 ```
 
 ### Step-by-Step Details
@@ -375,8 +409,14 @@ flowchart TD
     DB[("Local DB<br/>prefix only<br/>ab12cd34 (4bytes)")]
     DB -.-> LOCAL
 
+    style URL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CALC fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style MEM_FULL fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
+    style LOCAL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CMP1 fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style API fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style SERVER fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style CMP2 fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style RESULT fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
     style DB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
 ```
@@ -750,9 +790,15 @@ flowchart TD
     H --> I
     I --> B
 
+    style A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style B fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style C fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style D fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style E fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style F fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style G fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style H fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
+    style I fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
 ```
 
 ---
@@ -805,8 +851,21 @@ flowchart TD
     N -->|"FAILED / CANCELLED"| P["Submission failed"]
     N -->|"CLOSED"| Q["Processing complete (e.g., duplicate)"]
 
+    style A fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style B fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style C fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style D fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style E fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style F fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style G fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style H fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style BUILD fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
     style I fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
+    style J fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style K fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style L fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style M fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style N fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
     style O fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
     style P fill:#ffcdd2,stroke:#c62828,color:#1a1a1a
     style Q fill:#fff9c4,stroke:#f57f17,color:#1a1a1a
@@ -876,9 +935,19 @@ graph TD
     TD --> RC["region_codes<br/>['US', 'KR']"]
 
     style REQ fill:#fff3e0,stroke:#e65100,color:#1a1a1a
+    style PARENT fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style SUB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
     style TI fill:#e3f2fd,stroke:#1565c0,color:#1a1a1a
     style TD fill:#e8f5e9,stroke:#2e7d32,color:#1a1a1a
-    style SUB fill:#f3e5f5,stroke:#7b1fa2,color:#1a1a1a
+    style URI fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style AT fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style TC fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style TJ fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style CL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style LABELS fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style COMMENTS fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style PLAT fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
+    style RC fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
 ```
 
 #### 9.3 Enum Reference
