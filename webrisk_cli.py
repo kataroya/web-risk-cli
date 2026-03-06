@@ -27,6 +27,14 @@ from google.cloud import webrisk_v1
 import threat_hash_store
 from url_threat_checker import check_url
 from threat_list_syncer import ALL_THREAT_TYPES, should_sync, sync_all, sync_threat_list
+from url_submitter import (
+    ABUSE_TYPES,
+    CONFIDENCE_LEVELS,
+    JUSTIFICATION_LABELS,
+    PLATFORMS,
+    poll_operation,
+    submit_uri,
+)
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -93,6 +101,72 @@ def cmd_cache_clear(args: argparse.Namespace) -> None:
     deleted = threat_hash_store.clear_cache()
     print(f"Cache cleared. {deleted} entries removed.")
 
+
+def cmd_submit(args: argparse.Namespace) -> None:
+    """Submit a suspicious URI to Google Web Risk for review."""
+    verbose = args.verbose
+    project_id = args.project
+
+    # Parse optional justification labels (comma-separated)
+    justification_labels = None
+    if args.justification:
+        justification_labels = [l.strip() for l in args.justification.split(",")]
+
+    # Parse optional justification comments
+    justification_comments = None
+    if args.comment:
+        justification_comments = [args.comment]
+
+    # Parse optional region codes (comma-separated)
+    region_codes = None
+    if args.region:
+        region_codes = [r.strip().upper() for r in args.region.split(",")]
+
+    print(f"Submitting: {args.url}")
+    print(f"  Threat type : {args.type}")
+    print(f"  Confidence  : {args.confidence}")
+    if justification_labels:
+        print(f"  Justification: {', '.join(justification_labels)}")
+    if justification_comments:
+        print(f"  Comment     : {justification_comments[0]}")
+    if args.platform:
+        print(f"  Platform    : {args.platform}")
+    if region_codes:
+        print(f"  Regions     : {', '.join(region_codes)}")
+    print()
+
+    try:
+        result = submit_uri(
+            project_id=project_id,
+            uri=args.url,
+            threat_type=args.type,
+            confidence=args.confidence,
+            justification_labels=justification_labels,
+            justification_comments=justification_comments,
+            platform=args.platform,
+            region_codes=region_codes,
+            verbose=verbose,
+        )
+    except Exception as e:
+        print(f"  Submit FAILED: {e}")
+        sys.exit(1)
+
+    print(f"  Submission accepted!")
+    print(f"  Operation: {result['operation_name']}")
+
+    # If --wait is specified, poll until the operation completes
+    if args.wait:
+        print(f"\n  Waiting for Google to process (timeout: {args.timeout}s)...")
+        poll_result = poll_operation(
+            result["operation_name"],
+            timeout=args.timeout,
+            poll_interval=args.interval,
+            verbose=verbose,
+        )
+        print(f"\n  Final state: {poll_result['state']}")
+        if not poll_result["done"]:
+            print("  (Operation did not complete within timeout)")
+
     print("=== Local DB Status ===\n")
     for tt in ALL_THREAT_TYPES:
         tt_val = int(tt)
@@ -137,6 +211,55 @@ def main() -> None:
     # cache-clear
     sub.add_parser("cache-clear", help="Clear URL check cache")
 
+    # submit
+    p_submit = sub.add_parser("submit", help="Submit a suspicious URI to Google for review")
+    p_submit.add_argument("url", help="Suspicious URL to submit")
+    p_submit.add_argument(
+        "--project", required=True,
+        help="GCP project ID (e.g. my-project-123)",
+    )
+    p_submit.add_argument(
+        "--type", default="SOCIAL_ENGINEERING",
+        choices=list(ABUSE_TYPES.keys()),
+        help="Threat type (default: SOCIAL_ENGINEERING)",
+    )
+    p_submit.add_argument(
+        "--confidence", default="MEDIUM",
+        choices=list(CONFIDENCE_LEVELS.keys()),
+        help="Confidence level (default: MEDIUM)",
+    )
+    p_submit.add_argument(
+        "--justification",
+        help="Comma-separated justification labels: MANUAL_VERIFICATION,USER_REPORT,AUTOMATED_REPORT",
+    )
+    p_submit.add_argument(
+        "--comment", help="Free-form comment explaining why the URI is a threat",
+    )
+    p_submit.add_argument(
+        "--platform",
+        choices=list(PLATFORMS.keys()),
+        help="Platform where the threat was discovered",
+    )
+    p_submit.add_argument(
+        "--region",
+        help="Comma-separated ISO 3166-1 alpha-2 region codes (e.g. US,KR)",
+    )
+    p_submit.add_argument(
+        "-v", "--verbose", action="store_true", help="Show step-by-step progress",
+    )
+    p_submit.add_argument(
+        "--wait", action="store_true",
+        help="Wait for Google to finish processing the submission",
+    )
+    p_submit.add_argument(
+        "--timeout", type=int, default=600,
+        help="Max seconds to wait when --wait is set (default: 600)",
+    )
+    p_submit.add_argument(
+        "--interval", type=int, default=10,
+        help="Poll interval in seconds when --wait is set (default: 10)",
+    )
+
     args = parser.parse_args()
 
     commands = {
@@ -144,6 +267,7 @@ def main() -> None:
         "check": cmd_check,
         "status": cmd_status,
         "cache-clear": cmd_cache_clear,
+        "submit": cmd_submit,
     }
     commands[args.command](args)
 

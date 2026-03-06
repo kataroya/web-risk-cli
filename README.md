@@ -1,10 +1,12 @@
-# Web Risk Update API Client
+# Web Risk API Client
 
-A Python client that uses the [Google Cloud Web Risk Update API](https://cloud.google.com/web-risk/docs/update-api) to maintain a local threat hash database and check URLs for threats.
+A Python client that uses the [Google Cloud Web Risk API](https://cloud.google.com/web-risk/docs) to maintain a local threat hash database, check URLs for threats, and submit suspicious URLs for review.
 
 ## Overview
 
-This client implements the **Update API** workflow:
+This client implements two workflows:
+
+### Update API — Threat Detection
 
 1. **Sync** — Periodically fetches threat list diffs via `ComputeThreatListDiff` and stores hash prefixes in a local SQLite database.
 2. **Check** — For a given URL, computes SHA-256 hashes, matches them against the local DB, and verifies matches via the `SearchHashes` API.
@@ -22,6 +24,21 @@ This client implements the **Update API** workflow:
     → If matched: SearchHashes API (full hash verification)
     → Return threat result
 ```
+
+### Submit URI API — Threat Reporting
+
+3. **Submit** — Submits suspicious URLs to Google's Safe Browsing blocklist for review via the `SubmitUri` API.
+
+```
+[Submit Flow]
+  Suspicious URL + threat metadata
+    → SubmitUri API (Long Running Operation)
+    → Google reviews and adds to blocklist
+    → Poll operation status (optional)
+```
+
+> **Note**: The Submit URI API requires your GCP project to be allowlisted.
+> Contact your Google Cloud sales representative or Customer Engineer.
 
 ### Supported Threat Types
 
@@ -100,6 +117,26 @@ Checking: http://malicious-site.example
     - MALWARE (expires: 2026-02-25T00:00:00+00:00)
 ```
 
+### Submit a Suspicious URL
+
+```bash
+# Basic submission
+python webrisk_cli.py submit "http://phishing.example/login" \
+    --project my-project-123 \
+    --type SOCIAL_ENGINEERING
+
+# Full options with wait
+python webrisk_cli.py submit "http://malware.example/payload" \
+    --project my-project-123 \
+    --type MALWARE \
+    --confidence HIGH \
+    --justification "MANUAL_VERIFICATION" \
+    --comment "Confirmed malware dropper" \
+    --platform WINDOWS \
+    --region "US,KR" \
+    --wait -v
+```
+
 ### View Local DB Status
 
 ```bash
@@ -130,18 +167,21 @@ Output:
 
 | File                        | Description                                               |
 |-----------------------------|-----------------------------------------------------------|
-| `webrisk_cli.py`            | CLI entry point (`sync`, `check`, `status` commands)      |
+| `webrisk_cli.py`            | CLI entry point (`sync`, `check`, `status`, `submit`, `cache-clear`) |
 | `threat_list_syncer.py`     | Fetches diffs via `ComputeThreatListDiff` and applies them |
 | `url_threat_checker.py`     | Local prefix matching + `SearchHashes` API verification   |
 | `url_canonicalizer.py`      | URL canonicalization and SHA-256 hashing                  |
+| `url_submitter.py`          | Submit suspicious URLs via `SubmitUri` API + LRO polling  |
 | `threat_hash_store.py`      | SQLite storage for hash prefixes and metadata             |
+| `WORKFLOW_GUIDE.md`         | Detailed workflow documentation with Mermaid diagrams     |
 | `webrisk_local.db`          | Auto-generated local SQLite database (gitignore this)     |
 
 ## References
 
 - [Web Risk API Documentation](https://cloud.google.com/web-risk/docs)
 - [Update API Guide](https://cloud.google.com/web-risk/docs/update-api)
+- [Submit URI Guide](https://cloud.google.com/web-risk/docs/submit-uri)
 - [URLs and Hashing](https://cloud.google.com/web-risk/docs/urls-hashing)
 - [ComputeThreatListDiff RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#computethreatlistdiffrequest)
 - [SearchHashes RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#searchhashesrequest)
-# web-risk-cli
+- [SubmitUri RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#submituriRequest)

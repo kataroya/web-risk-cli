@@ -1,6 +1,6 @@
-# Web Risk Update API — Workflow & Best Practice Guide
+# Web Risk API — Workflow & Best Practice Guide
 
-> Google Cloud Web Risk Update API를 활용한 URL 위협 검사 클라이언트의 전체 워크플로우를 설명합니다.
+> Google Cloud Web Risk API를 활용한 URL 위협 검사 및 신고 클라이언트의 전체 워크플로우를 설명합니다.
 > 각 단계별 함수 호출, 데이터 흐름, 구현 세부사항을 포함합니다.
 
 ---
@@ -15,9 +15,10 @@
 6. [Workflow 4 — Suffix/Prefix Expression 생성](#6-workflow-4--suffixprefix-expression-생성)
 7. [Workflow 5 — SHA-256 해시 계산](#7-workflow-5--sha-256-해시-계산)
 8. [Workflow 6 — 캐싱](#8-workflow-6--캐싱)
-9. [파일 구조 & 함수 참조](#9-파일-구조--함수-참조)
-10. [CLI 사용 예시](#10-cli-사용-예시)
-11. [Best Practices](#11-best-practices)
+9. [Workflow 7 — 의심 URL 신고 (Submit URI)](#9-workflow-7--의심-url-신고-submit-uri)
+10. [파일 구조 & 함수 참조](#10-파일-구조--함수-참조)
+11. [CLI 사용 예시](#11-cli-사용-예시)
+12. [Best Practices](#12-best-practices)
 
 ---
 
@@ -27,12 +28,14 @@
 graph TB
     subgraph APP["웹 애플리케이션 / OEM 제품"]
         URL_INPUT["URL 입력"]
+        SUSPICIOUS["의심 URL 신고"]
     end
 
-    subgraph CLIENT["Web Risk Update API Client"]
+    subgraph CLIENT["Web Risk API Client"]
         CHECKER["URL Threat Checker<br/><i>url_threat_checker.py</i>"]
         CANON["URL Canonicalizer<br/><i>url_canonicalizer.py</i>"]
         SYNCER["Threat List Syncer<br/><i>threat_list_syncer.py</i>"]
+        SUBMITTER["URL Submitter<br/><i>url_submitter.py</i>"]
         CACHE[("URL Cache<br/>(SQLite)")]
         HASHDB[("Hash Prefix DB<br/>(SQLite)")]
     end
@@ -40,6 +43,7 @@ graph TB
     subgraph GOOGLE["Google Cloud"]
         SEARCH_API["SearchHashes API"]
         DIFF_API["ComputeThreatListDiff API"]
+        SUBMIT_API["SubmitUri API"]
     end
 
     URL_INPUT --> CHECKER
@@ -49,6 +53,8 @@ graph TB
     CANON --> HASHDB
     SYNCER <--> DIFF_API
     SYNCER --> HASHDB
+    SUSPICIOUS --> SUBMITTER
+    SUBMITTER --> SUBMIT_API
 
     style APP fill:#e3f2fd,stroke:#1565c0
     style CLIENT fill:#fff3e0,stroke:#e65100
@@ -64,6 +70,17 @@ graph TB
 | 네트워크 | 매 검사마다 API 호출 | 대부분 로컬에서 처리 (비매칭 시 API 호출 없음) |
 | 비용 | 호출 건수에 비례 | 주기적 동기화 + 드문 SearchHashes 호출 |
 | 적합 대상 | 프로토타입, 소량 검사 | **OEM 제품, 대량 검사, 프라이버시 중요 환경** |
+
+### Submit URI API란?
+
+| 항목 | Update API (소비) | Submit URI API (기여) |
+|-----|-------------------|----------------------|
+| 데이터 방향 | Google → 클라이언트 (위협 데이터 수신) | 클라이언트 → Google (의심 URL 제출) |
+| 목적 | URL이 위협인지 **검사** | 의심 URL을 Google 블록리스트에 **추가 요청** |
+| 프라이버시 | 해시 프리픽스만 전송 | URL 전체를 Google에 전송 |
+| 응답 | 즉시 결과 반환 | Long Running Operation (비동기) |
+| 사전 조건 | API 활성화만 필요 | **프로젝트 allowlist 필요** (영업팀 연락) |
+| 사용 예 | 브라우저/메일 필터 | 피싱 신고 시스템, 보안 운영 자동화 |
 
 ---
 
@@ -722,7 +739,260 @@ flowchart TD
 
 ---
 
-## 9. 파일 구조 & 함수 참조
+## 9. Workflow 7 — 의심 URL 신고 (Submit URI)
+
+Google Web Risk의 **SubmitUri API**를 사용하여 의심 URL을 Google Safe Browsing 블록리스트에 추가 요청하는 워크플로우입니다.
+
+> **⚠️ 사전 조건**: SubmitUri API를 사용하려면 GCP 프로젝트가 **allowlist**에 등록되어야 합니다.
+> Google Cloud 영업팀 또는 Customer Engineer에게 연락하여 등록을 요청하세요.
+
+### Update API와의 차이
+
+```
+Update API (Workflow 1-6):
+  Google ──→ 클라이언트     (위협 데이터를 "소비")
+  방향: 다운로드 / 검사
+
+Submit URI (Workflow 7):
+  클라이언트 ──→ Google     (위협 데이터를 "기여")
+  방향: 업로드 / 신고
+```
+
+- **Update API**: Google이 관리하는 위협 목록을 로컬에 동기화하고, URL이 목록에 있는지 확인
+- **Submit URI**: 아직 목록에 없지만 의심되는 URL을 Google에 제출하여 검토 요청
+
+### 전체 흐름
+
+```mermaid
+flowchart TD
+    A["사용자 / 보안 시스템<br/>의심 URL 발견"] --> B["webrisk_cli.py<br/>cmd_submit()"]
+    B --> C["url_submitter.py<br/>submit_uri()"]
+
+    subgraph BUILD["요청 객체 구성"]
+        C --> D["① Submission<br/>uri='http://phishing.example'"]
+        D --> E["② ThreatInfo<br/>abuse_type, confidence,<br/>justification"]
+        E --> F["③ ThreatDiscovery<br/>platform, region_codes"]
+        F --> G["④ SubmitUriRequest<br/>parent='projects/{id}'"]
+    end
+
+    G --> H["⑤ client.submit_uri(request)"]
+    H --> I["Google Web Risk API"]
+    I --> J["Long Running Operation<br/>(비동기 처리)"]
+    J --> K{"⑥ --wait 옵션?"}
+    K -->|"아니오"| L["Operation name 반환<br/>사용자가 나중에 확인"]
+    K -->|"예"| M["poll_operation()<br/>주기적 상태 확인"]
+    M --> N{"상태 확인"}
+    N -->|"RUNNING"| M
+    N -->|"SUCCEEDED"| O["✅ 신고 완료<br/>Google 블록리스트에 반영됨"]
+    N -->|"FAILED / CANCELLED"| P["❌ 신고 실패"]
+    N -->|"CLOSED"| Q["🔒 처리 완료 (중복 등)"]
+
+    style BUILD fill:#e3f2fd,stroke:#1565c0
+    style I fill:#e8f5e9,stroke:#2e7d32
+    style O fill:#e8f5e9,stroke:#2e7d32
+    style P fill:#ffcdd2,stroke:#c62828
+    style Q fill:#fff9c4,stroke:#f57f17
+```
+
+### 단계별 상세
+
+#### 9.1 요청 객체 구성
+
+SubmitUri API는 여러 중첩된 protobuf 메시지로 요청을 구성합니다:
+
+```python
+# url_submitter.py → submit_uri()
+
+# ① Submission — 제출할 URL
+submission = webrisk_v1.Submission(uri="http://phishing.example")
+
+# ② ThreatInfo — 위협 분류 정보
+threat_info = webrisk_v1.ThreatInfo(
+    abuse_type=webrisk_v1.ThreatInfo.AbuseType.SOCIAL_ENGINEERING,
+    threat_confidence=webrisk_v1.ThreatInfo.Confidence(
+        level=webrisk_v1.ThreatInfo.Confidence.ConfidenceLevel.MEDIUM,
+    ),
+    threat_justification=webrisk_v1.ThreatInfo.ThreatJustification(
+        labels=[JustificationLabel.USER_REPORT],
+        comments=["Reported by end user via phishing button"],
+    ),
+)
+
+# ③ ThreatDiscovery — 발견 환경 정보 (선택사항)
+threat_discovery = webrisk_v1.ThreatDiscovery(
+    platform=webrisk_v1.ThreatDiscovery.Platform.MACOS,
+    region_codes=["US", "KR"],
+)
+
+# ④ SubmitUriRequest — 최종 요청
+request = webrisk_v1.SubmitUriRequest(
+    parent="projects/my-project-123",
+    submission=submission,
+    threat_info=threat_info,
+    threat_discovery=threat_discovery,
+)
+```
+
+#### 9.2 요청 객체 구조도
+
+```mermaid
+graph TD
+    REQ["SubmitUriRequest"]
+    REQ --> PARENT["parent<br/>'projects/{project_id}'"]
+    REQ --> SUB["Submission"]
+    REQ --> TI["ThreatInfo"]
+    REQ --> TD["ThreatDiscovery"]
+
+    SUB --> URI["uri<br/>'http://phishing.example'"]
+
+    TI --> AT["abuse_type<br/>SOCIAL_ENGINEERING"]
+    TI --> TC["Confidence"]
+    TI --> TJ["ThreatJustification"]
+
+    TC --> CL["level<br/>MEDIUM"]
+
+    TJ --> LABELS["labels<br/>[USER_REPORT]"]
+    TJ --> COMMENTS["comments<br/>['설명 텍스트']"]
+
+    TD --> PLAT["platform<br/>MACOS"]
+    TD --> RC["region_codes<br/>['US', 'KR']"]
+
+    style REQ fill:#fff3e0,stroke:#e65100
+    style TI fill:#e3f2fd,stroke:#1565c0
+    style TD fill:#e8f5e9,stroke:#2e7d32
+    style SUB fill:#f3e5f5,stroke:#7b1fa2
+```
+
+#### 9.3 Enum 값 참조
+
+**AbuseType** (위협 유형):
+
+| 값 | 설명 |
+|---|------|
+| `MALWARE` | 악성 소프트웨어 배포 |
+| `SOCIAL_ENGINEERING` | 피싱 및 기만적 사이트 |
+| `UNWANTED_SOFTWARE` | 원치 않는 소프트웨어 |
+
+> **참고**: `ThreatInfo.AbuseType`은 `ThreatType`과 다른 enum입니다.
+> `SOCIAL_ENGINEERING_EXTENDED_COVERAGE`는 AbuseType에 포함되지 않습니다.
+
+**ConfidenceLevel** (신뢰도):
+
+| 값 | 설명 |
+|---|------|
+| `LOW` | 자동 탐지, 낮은 확신 |
+| `MEDIUM` | 자동 탐지 + 일부 수동 확인 |
+| `HIGH` | 수동 검증 완료, 높은 확신 |
+
+**JustificationLabel** (신고 근거):
+
+| 값 | 설명 |
+|---|------|
+| `MANUAL_VERIFICATION` | 보안 전문가가 수동으로 확인 |
+| `USER_REPORT` | 최종 사용자가 신고 |
+| `AUTOMATED_REPORT` | 자동화된 시스템이 탐지 |
+
+**Platform** (발견 플랫폼):
+
+| 값 | 설명 |
+|---|------|
+| `ANDROID` | Android 환경 |
+| `IOS` | iOS 환경 |
+| `MACOS` | macOS 환경 |
+| `WINDOWS` | Windows 환경 |
+
+#### 9.4 API 호출 및 Long Running Operation
+
+```python
+# url_submitter.py → submit_uri()
+client = webrisk_v1.WebRiskServiceClient()
+operation = client.submit_uri(request=request)
+# → operation.operation.name: "projects/{id}/operations/{op_id}"
+```
+
+SubmitUri는 **Long Running Operation (LRO)**을 반환합니다:
+- Google이 제출된 URL을 검토하는 데 수 분~수 시간이 걸릴 수 있음
+- 즉시 결과를 반환하지 않고, 나중에 상태를 조회할 수 있는 Operation 식별자를 반환
+
+#### 9.5 Operation 상태 추적
+
+```python
+# url_submitter.py → poll_operation()
+# 주기적으로 Operation 상태를 조회하여 완료 여부 확인
+
+from google.api_core import operations_v1
+
+ops_client = operations_v1.OperationsClient(transport.grpc_channel)
+op = ops_client.get_operation(operation_name)
+
+# op.done == True 이면 처리 완료
+# metadata에서 최종 상태 확인
+```
+
+**Operation 상태값:**
+
+| 상태 | 의미 |
+|-----|------|
+| `RUNNING` | Google이 URL을 검토 중 |
+| `SUCCEEDED` | 검토 완료, 블록리스트에 반영됨 |
+| `FAILED` | 검토 실패 (URL 접근 불가 등) |
+| `CANCELLED` | 작업이 취소됨 |
+| `CLOSED` | 처리 종료 (중복 제출 등) |
+
+#### 9.6 Operation 라이프사이클
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자 (CLI)
+    participant S as url_submitter.py
+    participant G as Google SubmitUri API
+    participant R as Google 검토 시스템
+
+    U->>S: submit_uri(project, url, ...)
+    activate S
+
+    Note over S: 요청 객체 구성<br/>(Submission, ThreatInfo, ThreatDiscovery)
+    S->>G: client.submit_uri(request)
+    G-->>S: Operation {name, RUNNING}
+    S-->>U: operation_name 반환
+
+    deactivate S
+
+    Note over G,R: Google 내부 검토 (비동기)<br/>URL 접근, 콘텐츠 분석, 판정
+
+    opt --wait 옵션 사용 시
+        U->>S: poll_operation(operation_name)
+        activate S
+
+        loop 주기적 폴링 (기본 10초)
+            S->>G: get_operation(name)
+            G-->>S: {done: false, state: RUNNING}
+            Note over S: 대기...
+        end
+
+        S->>G: get_operation(name)
+        G-->>S: {done: true, state: SUCCEEDED}
+        S-->>U: 최종 상태 반환
+
+        deactivate S
+    end
+```
+
+#### 9.7 Google의 Best Practice
+
+| 권장 사항 | 설명 |
+|----------|------|
+| **신뢰도(confidence) 정확히 기입** | HIGH는 수동 검증 완료 시에만 사용. 잘못된 HIGH 신뢰도는 오탐 유발. |
+| **근거(justification) 상세 기입** | labels + comments를 함께 작성하면 Google 검토 속도 향상. |
+| **중복 제출 피하기** | 동일 URL을 반복 제출하면 CLOSED 상태로 처리될 수 있음. |
+| **region_codes 활용** | 지역 특화 피싱(예: 한국 대상 피싱)은 지역 코드를 명시하면 분류 정확도 향상. |
+| **platform 명시** | 모바일 전용 피싱 등 플랫폼 특화 위협은 반드시 플랫폼 지정. |
+| **비동기 처리 감안** | LRO는 즉시 완료되지 않음. 사용자 UX에서 "제출됨" 상태를 별도 표시. |
+| **allowlist 확인** | API 호출 전 프로젝트가 allowlist에 등록되었는지 확인 (미등록 시 403 에러). |
+
+---
+
+## 10. 파일 구조 & 함수 참조
 
 ### `url_canonicalizer.py` — URL 정규화 & 해싱
 
@@ -774,6 +1044,28 @@ flowchart TD
 |------|------|
 | `check_url(url, client, use_cache, verbose)` | 4단계 URL 검사 (캐시→로컬→API→캐시 저장) |
 
+### `url_submitter.py` — 의심 URL 신고
+
+| 함수 | 설명 |
+|------|------|
+| `submit_uri(project_id, uri, ...)` | 의심 URL을 Google에 제출 (LRO 반환) |
+| `poll_operation(operation_name, ...)` | LRO 상태를 주기적으로 폴링하여 완료 대기 |
+| `_get_state_from_metadata(metadata_any)` | Operation metadata에서 상태 문자열 추출 |
+
+**`submit_uri()` 파라미터:**
+
+| 파라미터 | 타입 | 필수 | 기본값 | 설명 |
+|---------|------|------|-------|------|
+| `project_id` | `str` | ✅ | — | GCP 프로젝트 ID |
+| `uri` | `str` | ✅ | — | 제출할 의심 URL |
+| `threat_type` | `str` | — | `"SOCIAL_ENGINEERING"` | 위협 유형 |
+| `confidence` | `str` | — | `"MEDIUM"` | 신뢰도 레벨 |
+| `justification_labels` | `list[str]` | — | `None` | 신고 근거 라벨 |
+| `justification_comments` | `list[str]` | — | `None` | 자유 형식 설명 |
+| `platform` | `str` | — | `None` | 발견 플랫폼 |
+| `region_codes` | `list[str]` | — | `None` | ISO 3166-1 alpha-2 지역 코드 |
+| `verbose` | `bool` | — | `False` | 상세 출력 |
+
 ### `webrisk_cli.py` — CLI 인터페이스
 
 | 명령어 | 함수 | 설명 |
@@ -782,10 +1074,11 @@ flowchart TD
 | `check [-v] URL` | `cmd_check()` | URL 위협 검사 (`-v`: 상세 출력) |
 | `status` | `cmd_status()` | 로컬 DB 상태 확인 |
 | `cache-clear` | `cmd_cache_clear()` | URL 검사 캐시 전체 삭제 |
+| `submit URL --project ID [옵션]` | `cmd_submit()` | 의심 URL 신고 |
 
 ---
 
-## 10. CLI 사용 예시
+## 11. CLI 사용 예시
 
 ### 초기 동기화
 
@@ -882,9 +1175,76 @@ $ python webrisk_cli.py status
   URL check cache  : 42 entries
 ```
 
+### 의심 URL 신고 (기본)
+
+```bash
+$ python webrisk_cli.py submit "http://phishing.example/login" \
+    --project my-project-123 \
+    --type SOCIAL_ENGINEERING \
+    --confidence MEDIUM
+
+Submitting: http://phishing.example/login
+  Threat type : SOCIAL_ENGINEERING
+  Confidence  : MEDIUM
+
+  Submission accepted!
+  Operation: projects/my-project-123/operations/abc123def456
+```
+
+### 의심 URL 신고 (전체 옵션 + 대기)
+
+```bash
+$ python webrisk_cli.py submit "http://malware-drop.example/payload.exe" \
+    --project my-project-123 \
+    --type MALWARE \
+    --confidence HIGH \
+    --justification "MANUAL_VERIFICATION,USER_REPORT" \
+    --comment "Confirmed malware dropper by security team" \
+    --platform WINDOWS \
+    --region "US,KR" \
+    --wait \
+    --timeout 300 \
+    --interval 15 \
+    -v
+
+Submitting: http://malware-drop.example/payload.exe
+  Threat type : MALWARE
+  Confidence  : HIGH
+  Justification: MANUAL_VERIFICATION, USER_REPORT
+  Comment     : Confirmed malware dropper by security team
+  Platform    : WINDOWS
+  Regions     : US, KR
+
+  [Submit] URI: http://malware-drop.example/payload.exe
+  [Submit] Threat type: MALWARE
+  [Submit] Confidence: HIGH
+  [Submit] Justification labels: ['MANUAL_VERIFICATION', 'USER_REPORT']
+  [Submit] Justification comments: ['Confirmed malware dropper by security team']
+  [Submit] Platform: WINDOWS
+  [Submit] Region codes: ['US', 'KR']
+  [Submit] Built Submission object
+  [Submit] Built ThreatInfo object
+  [Submit] Built ThreatDiscovery object
+  [Submit] Built SubmitUriRequest (parent=projects/my-project-123)
+  [Submit] Calling SubmitUri API...
+  [Submit] Operation started: projects/my-project-123/operations/xyz789
+
+  Submission accepted!
+  Operation: projects/my-project-123/operations/xyz789
+
+  Waiting for Google to process (timeout: 300s)...
+  [Poll] Polling operation: projects/my-project-123/operations/xyz789
+  [Poll] Timeout: 300s, interval: 15s
+  [Poll] State: RUNNING ... (elapsed 0s)
+  [Poll] State: RUNNING ... (elapsed 15s)
+  [Poll] Operation completed. State: SUCCEEDED
+
+  Final state: SUCCEEDED
+```
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 ### 동기화 관련
 
@@ -921,12 +1281,27 @@ $ python webrisk_cli.py status
 | **캐시 정리** | `cache-clear` 또는 `purge_expired_cache()`로 만료 캐시를 정리하세요. |
 | **에러 핸들링** | 네트워크 오류 시 SearchHashes 호출이 실패해도 안전하게 처리됩니다. |
 
+### Submit URI 관련
+
+| Practice | 설명 |
+|----------|------|
+| **allowlist 등록 확인** | API 호출 전 GCP 프로젝트가 SubmitUri allowlist에 등록되었는지 확인. 미등록 시 `403 PERMISSION_DENIED`. |
+| **신뢰도(confidence) 정확히 기입** | `HIGH`는 수동 검증이 완료된 경우에만 사용. 잘못된 신뢰도는 오탐(false positive)을 유발. |
+| **근거(justification) 상세 기입** | `labels` + `comments`를 함께 작성하면 Google의 검토 속도가 향상됩니다. |
+| **중복 제출 피하기** | 동일 URL을 반복 제출하면 `CLOSED` 상태로 처리될 수 있음. |
+| **region_codes 활용** | 지역 특화 피싱(예: 한국 대상)은 지역 코드를 명시하면 분류 정확도 향상. |
+| **platform 명시** | 모바일 전용 피싱 등 플랫폼 특화 위협은 반드시 플랫폼을 지정. |
+| **LRO 비동기 처리** | `submit_uri()`는 즉시 완료되지 않음. UX에서 "제출 완료" 상태를 별도 표시. |
+| **타임아웃 설정** | `--wait` 사용 시 적절한 `--timeout` 설정. Google 검토 시간은 수 분~수 시간. |
+
 ---
 
 ## 참조
 
 - [Google Web Risk API 문서](https://cloud.google.com/web-risk/docs)
 - [Update API 가이드](https://cloud.google.com/web-risk/docs/update-api)
+- [Submit URI 가이드](https://cloud.google.com/web-risk/docs/submit-uri)
 - [URL 정규화 & 해싱 스펙](https://cloud.google.com/web-risk/docs/urls-hashing)
 - [ComputeThreatListDiff RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#computethreatlistdiffrequest)
 - [SearchHashes RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#searchhashesrequest)
+- [SubmitUri RPC](https://cloud.google.com/web-risk/docs/reference/rpc/google.cloud.webrisk.v1#submituriRequest)
