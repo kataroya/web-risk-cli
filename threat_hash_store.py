@@ -3,6 +3,7 @@
 Table structure:
   - hash_prefixes: stores hash prefixes per threat_type
   - metadata: manages version_token and next_diff time per threat_type
+  - url_check_cache: caches URL check results until expire_time
 """
 
 import sqlite3
@@ -35,6 +36,15 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 threat_type       INTEGER PRIMARY KEY,
                 version_token     BLOB,
                 next_diff_time    TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS url_check_cache (
+                url_sha256    BLOB    PRIMARY KEY,
+                url           TEXT    NOT NULL,
+                is_safe       INTEGER NOT NULL,
+                threats_json  TEXT,
+                expire_time   TEXT    NOT NULL,
+                checked_at    TEXT    NOT NULL
             );
             """
         )
@@ -185,6 +195,116 @@ def get_prefix_count(threat_type: int, db_path: Path = DB_PATH) -> int:
             "SELECT COUNT(*) FROM hash_prefixes WHERE threat_type = ?",
             (threat_type,),
         ).fetchone()
+        return row[0]
+    finally:
+        conn.close()
+
+
+# ── URL check cache ─────────────────────────────────────────────────
+
+import hashlib
+import json
+from datetime import timezone as _tz
+
+
+def get_cached_result(url: str, db_path: Path = DB_PATH) -> Optional[dict]:
+    """Return cached check result if it exists and has not expired. Otherwise None."""
+    url_hash = hashlib.sha256(url.encode("utf-8")).digest()
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT url, is_safe, threats_json, expire_time FROM url_check_cache "
+            "WHERE url_sha256 = ?",
+            (url_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        expire_time = datetime.fromisoformat(row[3])
+        if expire_time.tzinfo is None:
+            expire_time = expire_time.replace(tzinfo=_tz.utc)
+        if datetime.now(_tz.utc) >= expire_time:
+            # Cache expired — delete and return None
+            conn.execute(
+                "DELETE FROM url_check_cache WHERE url_sha256 = ?", (url_hash,)
+            )
+            conn.commit()
+            return None
+        return {
+            "url": row[0],
+            "safe": bool(row[1]),
+            "threats": json.loads(row[2]) if row[2] else [],
+            "cached": True,
+            "expire_time": row[3],
+        }
+    finally:
+        conn.close()
+
+
+def save_cached_result(
+    url: str,
+    is_safe: bool,
+    threats: list[dict],
+    expire_time: datetime,
+    db_path: Path = DB_PATH,
+) -> None:
+    """Cache a URL check result until expire_time."""
+    url_hash = hashlib.sha256(url.encode("utf-8")).digest()
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO url_check_cache
+                (url_sha256, url, is_safe, threats_json, expire_time, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url_sha256) DO UPDATE SET
+                is_safe      = excluded.is_safe,
+                threats_json = excluded.threats_json,
+                expire_time  = excluded.expire_time,
+                checked_at   = excluded.checked_at
+            """,
+            (
+                url_hash,
+                url,
+                int(is_safe),
+                json.dumps(threats) if threats else None,
+                expire_time.isoformat(),
+                datetime.now(_tz.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_cache(db_path: Path = DB_PATH) -> int:
+    """Delete all cached results. Returns the number of deleted rows."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM url_check_cache")
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def purge_expired_cache(db_path: Path = DB_PATH) -> int:
+    """Delete only expired cache entries. Returns the number of deleted rows."""
+    conn = get_connection(db_path)
+    try:
+        now = datetime.now(_tz.utc).isoformat()
+        cursor = conn.execute(
+            "DELETE FROM url_check_cache WHERE expire_time <= ?", (now,)
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def get_cache_count(db_path: Path = DB_PATH) -> int:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM url_check_cache").fetchone()
         return row[0]
     finally:
         conn.close()

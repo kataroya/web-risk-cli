@@ -67,8 +67,12 @@ def cmd_check(args: argparse.Namespace) -> None:
             break
 
     url = args.url
+    verbose = args.verbose
     print(f"Checking: {url}\n")
-    result = check_url(url, client)
+    result = check_url(url, client, verbose=verbose)
+
+    if result.get("cached"):
+        print("  (result from cache)")
 
     if result["safe"]:
         print("  Safe - no threats detected.")
@@ -82,6 +86,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     """Display local DB status."""
     threat_hash_store.init_db()
 
+
+def cmd_cache_clear(args: argparse.Namespace) -> None:
+    """Clear the URL check cache."""
+    threat_hash_store.init_db()
+    deleted = threat_hash_store.clear_cache()
+    print(f"Cache cleared. {deleted} entries removed.")
+
     print("=== Local DB Status ===\n")
     for tt in ALL_THREAT_TYPES:
         tt_val = int(tt)
@@ -94,6 +105,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"    version_token  : {token[:16].hex() + '...' if token else '(none)'}")
         print(f"    next diff time : {next_diff or '(not set)'}")
         print()
+
+    cache_count = threat_hash_store.get_cache_count()
+    print(f"  URL check cache  : {cache_count:,} entries")
 
 
 def main() -> None:
@@ -113,9 +127,15 @@ def main() -> None:
     # check
     p_check = sub.add_parser("check", help="Check URL for threats")
     p_check.add_argument("url", help="URL to check")
+    p_check.add_argument(
+        "-v", "--verbose", action="store_true", help="Show step-by-step progress"
+    )
 
     # status
     sub.add_parser("status", help="Show local DB status")
+
+    # cache-clear
+    sub.add_parser("cache-clear", help="Clear URL check cache")
 
     args = parser.parse_args()
 
@@ -123,6 +143,7 @@ def main() -> None:
         "sync": cmd_sync,
         "check": cmd_check,
         "status": cmd_status,
+        "cache-clear": cmd_cache_clear,
     }
     commands[args.command](args)
 
