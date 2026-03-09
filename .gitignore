@@ -22,6 +22,10 @@ node_modules/
 package.json
 package-lock.json
 
+# LinkedIn posts (personal, not part of public project)
+LINKEDIN_POST_KR.md
+LINKEDIN_POST_EN.md
+
 # Generated artifacts
 mermaid_images/
 *.docx
