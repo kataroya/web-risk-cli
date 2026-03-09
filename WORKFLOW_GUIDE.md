@@ -397,16 +397,16 @@ for threat in response.threats:
 
 ```mermaid
 flowchart TD
-    URL["URL: 'http://evil.com/malware'"] --> CALC["compute_url_hashes()<br/>url_threat_checker.py L47-49"]
-    CALC --> MEM_FULL["In-memory full hashes<br/>[ab12cd34ef56...32bytes, ...]"]
-    MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/>url_threat_checker.py L53-56"]
-    LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>ab12cd34 == ab12cd34"]
-    CMP1 --> API["search_hashes(prefix=ab12cd34)<br/>url_threat_checker.py L72-80"]
-    API --> SERVER["Google returns full hash candidates<br/>ab12cd34ef56...32bytes (MALWARE)<br/>ab12cd349876...32bytes (PHISHING)<br/>ab12cd3412345...32bytes (MALWARE)"]
-    SERVER --> CMP2["threat.hash in url_hashes<br/>url_threat_checker.py L86-87"]
-    CMP2 --> RESULT["Server full hash == in-memory full hash<br/>→ Threat confirmed!"]
+    URL["URL: testsafebrowsing.appspot.com/s/malware.html"] --> CALC["compute_url_hashes()<br/>url_threat_checker.py"]
+    CALC --> MEM_FULL["In-memory full hashes<br/>[5b0b8975...32bytes, e4b1d041..., ...]"]
+    MEM_FULL --> LOCAL["lookup_prefix(full_hash)<br/>Compare first 4 bytes"]
+    LOCAL --> CMP1["full_hash[:4] == DB prefix?<br/>5b0b8975 == 5b0b8975 ✅"]
+    CMP1 --> API["search_hashes(prefix=5b0b8975)<br/>4 bytes sent to Google"]
+    API --> SERVER["Google returns full hash candidates<br/>5b0b8975...2f517fee (MALWARE)"]
+    SERVER --> CMP2["threat.hash in url_hashes?<br/>32-byte full comparison"]
+    CMP2 --> RESULT["Server full hash == computed full hash<br/>→ MALWARE confirmed!"]
 
-    DB[("Local DB<br/>prefix only<br/>ab12cd34 (4bytes)")]
+    DB[("Local DB<br/>prefix only<br/>5b0b8975 (4bytes)")]
     DB -.-> LOCAL
 
     style URL fill:#ffffff,stroke:#90a4ae,color:#1a1a1a
@@ -442,31 +442,31 @@ sequenceDiagram
     participant DB as Local SQLite DB
     participant G as Google API
 
-    U->>F: check_url("http://evil.com")
+    U->>F: check_url("testsafebrowsing.appspot.com/s/malware.html")
     activate F
 
     Note over F,MEM: Step 1 — Compute full hashes
     F->>MEM: url_hashes = compute_url_hashes(url)
-    Note over MEM: Full hash list held in memory<br/>[ab12cd34...32bytes, ...]
+    Note over MEM: 6 full hashes in memory<br/>[5b0b8975...32bytes, e4b1d041..., ...]
 
     Note over F,DB: Step 1 — Local prefix matching
     F->>DB: lookup_prefix(full_hash)
-    DB-->>F: Match found! (prefix ab12cd34)
+    DB-->>F: Match found! (prefix 5b0b8975 → MALWARE)
 
     Note over F,G: Step 2 — Google API call
-    F->>G: search_hashes(prefix=ab12cd34)
-    G-->>MEM: response.threats (full hash candidate list)
+    F->>G: search_hashes(prefix=5b0b8975)
+    G-->>MEM: response: 5b0b8975...2f517fee (MALWARE)
     Note over MEM: Server response also held in memory
 
     Note over F,MEM: Step 2 — Full hash comparison (in-memory)
     F->>MEM: threat.hash in url_hashes?
-    MEM-->>F: Match! → Threat confirmed
+    MEM-->>F: Match! → MALWARE confirmed
 
     Note over F,DB: Step 3 — Only final verdict is persisted
     F->>DB: save_cached_result(result)
     Note over DB: Only safe/threat verdict cached
 
-    F-->>U: {"safe": false, "threats": [...]}
+    F-->>U: {"safe": false, "threats": [MALWARE]}
     deactivate F
 
     Note over MEM: Function ends → variables destroyed<br/>url_hashes, response all freed
@@ -709,6 +709,25 @@ Combinations (2):
   1.2.3.4/
 ```
 
+#### Example 4: Real Test — `http://testsafebrowsing.appspot.com/s/malware.html`
+
+Actual output from `python webrisk_cli.py check -v`:
+
+```
+Host suffixes: [testsafebrowsing.appspot.com, appspot.com]
+Path prefixes: [/s/malware.html, /, /s/]
+
+Combinations (6):
+  [0] testsafebrowsing.appspot.com/s/malware.html
+  [1] testsafebrowsing.appspot.com/
+  [2] testsafebrowsing.appspot.com/s/
+  [3] appspot.com/s/malware.html
+  [4] appspot.com/
+  [5] appspot.com/s/
+```
+
+Each expression is then hashed with SHA-256 (see [Section 7](#7-workflow-5--sha-256-hash-computation) for real hash values).
+
 ---
 
 ## 7. Workflow 5 — SHA-256 Hash Computation
@@ -747,6 +766,46 @@ DB Prefix (4 bytes):      ba7816bf
 
 > **Note**: Prefix length is specified by Google's API in the `ComputeThreatListDiff` response's
 > `prefix_size` field. The client does not choose this value.
+
+### Real Example — `testsafebrowsing.appspot.com/s/malware.html`
+
+Below are actual SHA-256 hash values and 4-byte prefixes generated from 
+Google's known malware test URL. The local DB contained **109,718 prefixes** 
+(MALWARE: 10,802 / SOCIAL_ENGINEERING: 65,536 / UNWANTED_SOFTWARE: 33,380) at the time of this test.
+
+| # | Expression | Full SHA-256 (32 bytes) | 4-Byte Prefix |
+|---|-----------|------------------------|---------------|
+| 0 | `testsafebrowsing.appspot.com/s/malware.html` | `5b0b89750c78f233fee25c6be32d928fcd805a8c5455c2110d29353c2f517fee` | **`5b0b8975`** |
+| 1 | `testsafebrowsing.appspot.com/` | `e4b1d041e105403cc4232f3b03f15124ec5213987582594f0f18ad68658b7f5c` | `e4b1d041` |
+| 2 | `testsafebrowsing.appspot.com/s/` | `1ab2b2e16edc6a4992511e45c2216e029f2a4c2ca6fdbfd2364181af5d481931` | `1ab2b2e1` |
+| 3 | `appspot.com/s/malware.html` | `ba084fd5531f20f4fde46567ebd1279bad1b230aab787f25bf0f00d3568fe286` | `ba084fd5` |
+| 4 | `appspot.com/` | `d5a054cdb146f4192707e8dcd3a3e4014b1c474e9b48a13cea7aea0209505fc1` | `d5a054cd` |
+| 5 | `appspot.com/s/` | `a67757b8c4fa267c1296dea74ab31c305c045dd85917a017626c3f60afcefce6` | `a67757b8` |
+
+**Local DB Prefix Matching Result:**
+
+```
+✅ MATCH  prefix=5b0b8975 -> MALWARE    (testsafebrowsing.appspot.com/s/malware.html)
+❌ No match  prefix=e4b1d041            (testsafebrowsing.appspot.com/)
+❌ No match  prefix=1ab2b2e1            (testsafebrowsing.appspot.com/s/)
+❌ No match  prefix=ba084fd5            (appspot.com/s/malware.html)
+❌ No match  prefix=d5a054cd            (appspot.com/)
+❌ No match  prefix=a67757b8            (appspot.com/s/)
+
+Local prefix matches: 1/6 → Only 1 hash needs API verification
+```
+
+**SearchHashes API Verification:**
+
+```
+Request:  prefix = 5b0b8975 (4 bytes sent to Google)
+Response: 1 threat entry returned
+  [0] MALWARE: 5b0b89750c78f233fee25c6be32d928fcd805a8c5455c2110d29353c2f517fee ← MATCH!
+
+Server full hash == Local computed full hash → THREAT CONFIRMED
+```
+
+Out of 6 expressions, only **1** matched a local prefix, resulting in just **1 SearchHashes API call** instead of 6.
 
 ---
 
@@ -1184,58 +1243,108 @@ Starting full forced sync...
 Sync complete.
 ```
 
-### URL Check (Verbose Mode)
+### URL Check — Safe URL (Verbose Mode)
 
 ```bash
-$ python webrisk_cli.py check -v "http://example.com/path?q=test"
+$ python webrisk_cli.py check -v "https://www.google.com"
 
-Checking: http://example.com/path?q=test
+Checking: https://www.google.com
 
   [Step 0] Checking cache...
   [Step 0] Cache MISS
-  [Step 1] Canonicalized URL: http://example.com/path?q=test
-  [Step 1] Generated 6 hash expressions
-  [Step 1] Local prefix matches: 0/6
+  [Step 1] Canonicalized URL: https://www.google.com/
+  [Step 1] Generated 2 hash expressions
+
+  ┌─ Suffix/Prefix Expressions & SHA-256 Hashes ────────────────────
+  │ [0] www.google.com/
+  │     full hash : bc9a8f2b6fffd58571e188bb110545f8fb3af51cdf1a63696d505a9870a85be5
+  │     4B prefix : bc9a8f2b
+  │ [1] google.com/
+  │     full hash : 88981e6263be34a6c0b53ada73d168b68828dd643723d34a812e9f8a6abb5ee9
+  │     4B prefix : 88981e62
+  └─────────────────────────────────────────────────────────────────
+
+  │ ❌ No match  prefix=bc9a8f2b <- www.google.com/
+  │ ❌ No match  prefix=88981e62 <- google.com/
+
+  [Step 1] Local prefix matches: 0/2
   [Step 1] No local match -> SAFE
   [Step 3] Result cached (TTL: 0:30:00)
-
   Safe - no threats detected.
+```
+
+### Threat Detected — Malware Test URL (Verbose Mode)
+
+Using Google's official test URL `testsafebrowsing.appspot.com/s/malware.html`:
+
+```bash
+$ python webrisk_cli.py check -v "http://testsafebrowsing.appspot.com/s/malware.html"
+
+Checking: http://testsafebrowsing.appspot.com/s/malware.html
+
+  [Step 0] Checking cache...
+  [Step 0] Cache MISS
+  [Step 1] Canonicalized URL: http://testsafebrowsing.appspot.com/s/malware.html
+  [Step 1] Generated 6 hash expressions
+
+  ┌─ Suffix/Prefix Expressions & SHA-256 Hashes ────────────────────
+  │ [0] testsafebrowsing.appspot.com/s/malware.html
+  │     full hash : 5b0b89750c78f233fee25c6be32d928fcd805a8c5455c2110d29353c2f517fee
+  │     4B prefix : 5b0b8975
+  │ [1] testsafebrowsing.appspot.com/
+  │     full hash : e4b1d041e105403cc4232f3b03f15124ec5213987582594f0f18ad68658b7f5c
+  │     4B prefix : e4b1d041
+  │ [2] testsafebrowsing.appspot.com/s/
+  │     full hash : 1ab2b2e16edc6a4992511e45c2216e029f2a4c2ca6fdbfd2364181af5d481931
+  │     4B prefix : 1ab2b2e1
+  │ [3] appspot.com/s/malware.html
+  │     full hash : ba084fd5531f20f4fde46567ebd1279bad1b230aab787f25bf0f00d3568fe286
+  │     4B prefix : ba084fd5
+  │ [4] appspot.com/
+  │     full hash : d5a054cdb146f4192707e8dcd3a3e4014b1c474e9b48a13cea7aea0209505fc1
+  │     4B prefix : d5a054cd
+  │ [5] appspot.com/s/
+  │     full hash : a67757b8c4fa267c1296dea74ab31c305c045dd85917a017626c3f60afcefce6
+  │     4B prefix : a67757b8
+  └─────────────────────────────────────────────────────────────────
+
+  │ ✅ MATCH prefix=5b0b8975 -> MALWARE
+  │    expression: testsafebrowsing.appspot.com/s/malware.html
+  │ ❌ No match  prefix=e4b1d041 <- testsafebrowsing.appspot.com/
+  │ ❌ No match  prefix=1ab2b2e1 <- testsafebrowsing.appspot.com/s/
+  │ ❌ No match  prefix=ba084fd5 <- appspot.com/s/malware.html
+  │ ❌ No match  prefix=d5a054cd <- appspot.com/
+  │ ❌ No match  prefix=a67757b8 <- appspot.com/s/
+
+  [Step 1] Local prefix matches: 1/6
+  [Step 2] Sending hash prefix 5b0b8975 to Google SearchHashes API...
+  │ request  : prefix=5b0b8975 (from: testsafebrowsing.appspot.com/s/malware.html)
+  │ full hash: 5b0b89750c78f233fee25c6be32d928fcd805a8c5455c2110d29353c2f517fee
+  [Step 2] Received 1 threat entries from Google
+  │ API returned 1 threat entries:
+  │   [0] MALWARE: 5b0b89750c78f233fee25c6be32d928fcd805a8c5455c2110d29353c2f517fee ← MATCH (our URL!)
+
+  [Step 2] THREAT DETECTED: 1 match(es)
+  [Step 3] Result cached until 2026-03-09T04:39:56.854485+00:00
+  Threat detected!
+    - MALWARE (expires: 2026-03-09T04:39:56.854485+00:00)
 ```
 
 ### URL Check (Cache HIT)
 
 ```bash
-$ python webrisk_cli.py check -v "http://example.com/path?q=test"
+$ python webrisk_cli.py check -v "http://testsafebrowsing.appspot.com/s/malware.html"
 
-Checking: http://example.com/path?q=test
+Checking: http://testsafebrowsing.appspot.com/s/malware.html
 
   [Step 0] Checking cache...
-  [Step 0] Cache HIT (expires: 2026-03-06T15:30:00+00:00)
-
+  [Step 0] Cache HIT (expires: 2026-03-09T04:39:56.854485+00:00)
   (result from cache)
-  Safe - no threats detected.
-```
-
-### Threat Detected
-
-```bash
-$ python webrisk_cli.py check -v "http://malicious-site.example"
-
-Checking: http://malicious-site.example
-
-  [Step 0] Checking cache...
-  [Step 0] Cache MISS
-  [Step 1] Canonicalized URL: http://malicious-site.example/
-  [Step 1] Generated 4 hash expressions
-  [Step 1] Local prefix matches: 1/4
-  [Step 2] Sending hash prefix a1b2c3d4 to Google SearchHashes API...
-  [Step 2] Received 3 threat entries from Google
-  [Step 2] THREAT DETECTED: 1 match(es)
-  [Step 3] Result cached until 2026-03-07T00:00:00+00:00
-
   Threat detected!
-    - MALWARE (expires: 2026-03-07T00:00:00+00:00)
+    - MALWARE (expires: 2026-03-09T04:39:56.854485+00:00)
 ```
+
+> When a cache HIT occurs, no hash computation or API call happens — the cached verdict is returned immediately.
 
 ### DB Status
 
@@ -1245,21 +1354,21 @@ $ python webrisk_cli.py status
 === Local DB Status ===
 
   MALWARE:
-    hash prefixes  : 9,839
-    version_token  : a1b2c3d4e5f6...
-    next diff time : 2026-03-06T12:30:00+00:00
+    hash prefixes  : 10,802
+    version_token  : 0a110801100618012203303031288080...
+    next diff time : 2026-03-09 04:19:53.394078+00:00
 
   SOCIAL_ENGINEERING:
     hash prefixes  : 65,536
-    version_token  : f6e5d4c3b2a1...
-    next diff time : 2026-03-06T12:30:00+00:00
+    version_token  : 0a110816100618012203303031288080...
+    next diff time : 2026-03-09 04:19:34.348721+00:00
 
   UNWANTED_SOFTWARE:
-    hash prefixes  : 32,880
-    version_token  : 1a2b3c4d5e6f...
-    next diff time : 2026-03-06T12:30:00+00:00
+    hash prefixes  : 33,380
+    version_token  : 0a110803100618012203303031288080...
+    next diff time : 2026-03-09 04:20:03.939100+00:00
 
-  URL check cache  : 42 entries
+  URL check cache  : 1 entries
 ```
 
 ### Submit Suspicious URL (Basic)

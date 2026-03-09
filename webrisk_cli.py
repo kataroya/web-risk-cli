@@ -94,6 +94,22 @@ def cmd_status(args: argparse.Namespace) -> None:
     """Display local DB status."""
     threat_hash_store.init_db()
 
+    print("=== Local DB Status ===\n")
+    for tt in ALL_THREAT_TYPES:
+        tt_val = int(tt)
+        count = threat_hash_store.get_prefix_count(tt_val)
+        token = threat_hash_store.get_version_token(tt_val)
+        next_diff = threat_hash_store.get_next_diff_time(tt_val)
+
+        print(f"  {tt.name}:")
+        print(f"    hash prefixes  : {count:,}")
+        print(f"    version_token  : {token[:16].hex() + '...' if token else '(none)'}")
+        print(f"    next diff time : {next_diff or '(not set)'}")
+        print()
+
+    cache_count = threat_hash_store.get_cache_count()
+    print(f"  URL check cache  : {cache_count:,} entries")
+
 
 def cmd_cache_clear(args: argparse.Namespace) -> None:
     """Clear the URL check cache."""
