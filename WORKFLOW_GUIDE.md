@@ -330,7 +330,8 @@ flowchart TD
 ```python
 # url_threat_checker.py → check_url()
 cached = threat_hash_store.get_cached_result(url)
-# → Looks up url_check_cache table by SHA-256 of the URL
+# → Looks up url_check_cache table by SHA-256 of the input URL string
+#   (cache key is the raw input URL string, not the canonicalized URL)
 # → Returns cached result if expire_time has not passed
 # → Deletes expired entries and returns None
 ```
@@ -378,7 +379,7 @@ for threat in response.threats:
 ```
 
 > **Privacy note**: Only a 4-byte hash prefix is sent to Google.
-> The original URL cannot be reverse-engineered from this prefix.
+> The original URL is not directly exposed, and reconstructing it from a 4-byte prefix alone is not practical.
 
 #### 4.3.1 Full Hash Comparison — Where Does the "Local Full Hash" Come From?
 
@@ -481,9 +482,9 @@ sequenceDiagram
 | Google API response (full hash candidates) | `response` | Step 2 (API call) | Function exit | No |
 | Final verdict (safe/threat) | `result` | Step 2 (comparison done) | **Cached in DB** | Yes |
 
-> **Key point**: Hash values themselves are never permanently stored.
-> Only the **verdict** ("is this URL safe or a threat?") is persisted in the cache.
-> On subsequent checks of the same URL, only the cached verdict is returned — no hash computation needed.
+> **Key point**: Full hashes generated during a check (`url_hashes`) and full hashes returned by Google (`response.threats[].hash`) are not persisted.
+> The cache stores verdict data plus URL metadata (`url`, `url_sha256`) and threat details with expiration.
+> On subsequent checks of the same input URL string, the cached verdict is returned without another API call.
 
 #### 4.4 Result Caching (Step 3)
 
